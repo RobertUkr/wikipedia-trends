@@ -1,0 +1,23 @@
+{
+  "name": "wikipedia-trends",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Agent Skill для аналізу переглядів Wikipedia",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "wikipedia-trends": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.9",
+    "typescript": "^5.9.2",
+    "vitest": "^4.1.11"
+  }
+}

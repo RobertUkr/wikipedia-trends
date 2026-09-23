@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { cacheKey, outputDir, readCache, writeCache } from '../lib/cache.js';
+import { message } from '../lib/messages.js';
 import { getSitelinks, probeLanguages } from '../lib/wikidata.js';
 import { getArticleViews, normalizeProject, toApiDate } from '../lib/wikimedia.js';
 import { ACCESS, AGENT, ArticleNotFound, GRANULARITY, SkillError } from '../types.js';
@@ -177,7 +178,7 @@ export async function runFetch(args: FetchArgs): Promise<FetchOutput> {
           project,
           status: 'no_data',
           title,
-          reason: `${project} has the article "${title}" but the Pageviews API returns no data between ${args.from} and ${args.to}`,
+          reason: message('NO_PAGEVIEWS_DATA', { project, title, from: args.from, to: args.to }),
           requiresConfirmation: false,
           searchQuery: null,
           searchHits: 0,
@@ -191,7 +192,7 @@ export async function runFetch(args: FetchArgs): Promise<FetchOutput> {
           project,
           status: 'fetch_failed',
           title,
-          reason: `${error.code}: ${error.message}`,
+          reason: message('LANGUAGE_FETCH_FAILED', { code: error.code, message: error.message }),
           requiresConfirmation: false,
           searchQuery: null,
           searchHits: 0,

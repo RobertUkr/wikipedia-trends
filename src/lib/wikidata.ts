@@ -7,6 +7,7 @@ import type {
   TopicCandidate,
   TopicResolution,
 } from '../types.js';
+import { message } from './messages.js';
 import { normalizeProject, requestJson, searchArticles } from './wikimedia.js';
 import type { RequestOptions } from './wikimedia.js';
 
@@ -264,9 +265,7 @@ export function classifySearchResult(lang: Lang, query: string, result: ArticleS
       project,
       status: 'possible_alternative',
       title: null,
-      reason:
-        `${project} has no article linked to this topic, but "${alternatives[0]?.title}" has a similar title. ` +
-        'Unconfirmed: ask the user before treating it as the same topic.',
+      reason: message('POSSIBLE_ALTERNATIVE', { project, title: alternatives[0]?.title ?? '' }),
       requiresConfirmation: true,
       searchQuery: query,
       searchHits: result.totalHits,
@@ -281,8 +280,8 @@ export function classifySearchResult(lang: Lang, query: string, result: ArticleS
     title: null,
     reason:
       result.totalHits > 0
-        ? `${project} mentions "${query}" in ${result.totalHits} article(s) but has no article about the topic itself`
-        : `${project} has no article and no search hits for "${query}"`,
+        ? message('NO_ARTICLE_WITH_MENTIONS', { project, query, hits: result.totalHits })
+        : message('NO_ARTICLE_NO_HITS', { project, query }),
     requiresConfirmation: false,
     searchQuery: query,
     searchHits: result.totalHits,
@@ -343,7 +342,10 @@ export async function probeLanguages(
         project: normalizeProject(lang),
         status: 'fetch_failed',
         title: null,
-        reason: `Search on ${normalizeProject(lang)} failed: ${error instanceof Error ? error.message : String(error)}`,
+        reason: message('SEARCH_FAILED', {
+          project: normalizeProject(lang),
+          error: error instanceof Error ? error.message : String(error),
+        }),
         requiresConfirmation: false,
         searchQuery: query,
         searchHits: 0,

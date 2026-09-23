@@ -42,6 +42,19 @@ export interface ProjectTotals {
   points: DailyPoint[];
 }
 
+export type MessageCode =
+  | 'NO_ARTICLE_WITH_MENTIONS'
+  | 'NO_ARTICLE_NO_HITS'
+  | 'POSSIBLE_ALTERNATIVE'
+  | 'SEARCH_FAILED'
+  | 'NO_PAGEVIEWS_DATA'
+  | 'LANGUAGE_FETCH_FAILED';
+
+export interface Message {
+  code: MessageCode;
+  params: Record<string, string | number>;
+}
+
 export interface ArticleSearchHit {
   title: string;
   pageid: number;
@@ -75,7 +88,7 @@ export interface LanguageAvailability {
   project: string;
   status: Exclude<LanguageStatus, 'available'>;
   title: string | null;
-  reason: string;
+  reason: Message;
   requiresConfirmation: boolean;
   searchQuery: string | null;
   searchHits: number;

@@ -133,6 +133,7 @@ describe('runFetch', () => {
       searchQuery: 'post przerywany',
       alternatives: [],
     });
+    expect(result.unavailable[0]?.reason.code).toBe('NO_ARTICLE_NO_HITS');
   });
 
   it('classifies a similar title as an unconfirmed alternative', async () => {
@@ -158,7 +159,8 @@ describe('runFetch', () => {
       url: 'https://pl.wikipedia.org/wiki/Post_przerywany_(dieta)',
       snippet: 'schemat żywienia',
     });
-    expect(pl?.reason).toContain('Unconfirmed');
+    expect(pl?.reason.code).toBe('POSSIBLE_ALTERNATIVE');
+    expect(pl?.reason.params).toEqual({ project: 'pl.wikipedia.org', title: 'Post przerywany (dieta)' });
   });
 
   it('does not fail when every requested language lacks an article', async () => {

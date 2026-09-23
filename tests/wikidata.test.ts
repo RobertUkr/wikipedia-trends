@@ -240,7 +240,8 @@ describe('classifySearchResult', () => {
     expect(result.status).toBe('no_article');
     expect(result.alternatives).toEqual([]);
     expect(result.searchHits).toBe(12);
-    expect(result.reason).toContain('12');
+    expect(result.reason.code).toBe('NO_ARTICLE_WITH_MENTIONS');
+    expect(result.reason.params).toEqual({ project: 'pl.wikipedia.org', query: 'post przerywany', hits: 12 });
   });
 
   it('reports possible_alternative and never marks it confirmed', () => {
@@ -263,7 +264,7 @@ describe('classifySearchResult', () => {
       confirmed: false,
       url: 'https://pl.wikipedia.org/wiki/Post_przerywany_(dieta)',
     });
-    expect(result.reason).toContain('Unconfirmed');
+    expect(result.reason.code).toBe('POSSIBLE_ALTERNATIVE');
   });
 });
 

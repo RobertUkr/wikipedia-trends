@@ -7,8 +7,9 @@ import { getSitelinks, probeLanguages } from '../lib/wikidata.js';
 import { normalizeProject } from '../lib/wikimedia.js';
 import { ArticleNotFound, SkillError } from '../types.js';
 import type { Lang, LanguageAvailability, Message } from '../types.js';
-import { analyzeLanguage } from './analyze.js';
+import { ARTIFACT_SCHEMA, analyzeLanguage, trendReport } from './analyze.js';
 import type { LanguageAnalysis } from './analyze.js';
+import type { Direction } from '../lib/stats.js';
 
 export const WEIGHTS = { growth: 0.5, level: 0.3, confidence: 0.2 } as const;
 
@@ -35,8 +36,10 @@ export interface RankedLanguage {
   medianPerMillion: number;
   percentPerYear: number | null;
   ci95: [number, number] | null;
+  direction: Direction;
   absolutePercentPerYear: number | null;
   recentPercentPerYear: number | null;
+  recentDirection: Direction | null;
   confidence: string;
   confidenceScore: number;
   perspective: number;
@@ -112,8 +115,10 @@ export function rank(analyses: LanguageAnalysis[]): RankedLanguage[] {
         medianPerMillion: Math.round(item.level.median * 100) / 100,
         percentPerYear: item.trend.percentPerYear,
         ci95: item.trend.ci95,
+        direction: item.trend.direction,
         absolutePercentPerYear: item.absoluteTrend.percentPerYear,
         recentPercentPerYear: item.recentTrend?.percentPerYear ?? null,
+        recentDirection: item.recentTrend?.direction ?? null,
         confidence: item.confidence.overall,
         confidenceScore: item.confidence.score,
         perspective: Math.round(perspective * 1000) / 1000,
@@ -194,10 +199,14 @@ export async function runCompare(args: CompareArgs): Promise<CompareOutput> {
     file,
     JSON.stringify(
       {
+        schema: ARTIFACT_SCHEMA,
+        kind: 'compare',
         qid: args.qid,
         from: args.from,
         to: args.to,
+        days: analyses[0]?.days ?? 0,
         comparedAt: new Date().toISOString(),
+        caveats,
         criterion: CRITERION,
         weights: WEIGHTS,
         comparable,
@@ -210,11 +219,20 @@ export async function runCompare(args: CompareArgs): Promise<CompareOutput> {
           unit: item.unit,
           days: item.days,
           primary: item.primary,
-          trend: { ...item.trend, slopePerWeek: item.fit.slope },
-          absoluteTrend: { ...item.absoluteTrend, slopePerWeek: item.absoluteFit.slope },
-          relativeTrend: item.relativeTrend,
-          recentTrend: item.recentTrend ? { ...item.recentTrend, weeks: item.recentWeeks } : null,
+          trend: trendReport(item.fit, item.trend),
+          absoluteTrend: trendReport(item.absoluteFit, item.absoluteTrend),
+          relativeTrend: item.relativeTrend ? trendReport(item.fit, item.relativeTrend) : null,
+          recentTrend:
+            item.recentFit && item.recentTrend
+              ? {
+                  ...trendReport(item.recentFit, item.recentTrend),
+                  weeks: item.recentWeeks,
+                  from: item.recentFrom,
+                  startWeek: item.weekly.weeks - item.recentWeeks,
+                }
+              : null,
           reversal: item.reversal,
+          missingDays: item.series.missingDays,
           yoy: item.yoy,
           level: item.level,
           rawLevel: item.rawLevel,

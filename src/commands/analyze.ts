@@ -18,7 +18,7 @@ import {
   trendPercentPerYear,
   yoyChange,
 } from '../lib/stats.js';
-import type { SeasonalityResult, Summary, TrendFit, TrendPercent, YoyResult } from '../lib/stats.js';
+import type { Direction, SeasonalityResult, Summary, TrendFit, TrendPercent, YoyResult } from '../lib/stats.js';
 import type { ReversalInput } from '../lib/confidence.js';
 import { getSitelinks } from '../lib/wikidata.js';
 import { normalizeProject } from '../lib/wikimedia.js';
@@ -27,12 +27,16 @@ import type { Lang, Message } from '../types.js';
 import { loadSeries, loadTotals } from './fetch.js';
 
 export const MIN_ANALYSIS_DAYS = 30;
+export const ARTIFACT_SCHEMA = 3;
 export const MIN_RECENT_WEEKS = 4;
 
 export interface TrendReport {
   percentPerYear: number | null;
   ci95: [number, number] | null;
+  direction: Direction;
   slopePerWeek: number;
+  intercept: number;
+  ci95Slope: [number, number];
   baseline: number;
   baselineSource: string;
 }
@@ -45,7 +49,10 @@ export function trendReport(fit: TrendFit, trend: TrendPercent): TrendReport {
   return {
     percentPerYear: trend.percentPerYear,
     ci95: trend.ci95,
+    direction: trend.direction,
     slopePerWeek: Math.round(fit.slope * 1e6) / 1e6,
+    intercept: Math.round(fit.intercept * 1e6) / 1e6,
+    ci95Slope: [Math.round(fit.ci95[0] * 1e6) / 1e6, Math.round(fit.ci95[1] * 1e6) / 1e6],
     baseline: Math.round(trend.baseline * 1000) / 1000,
     baselineSource: trend.baselineSource,
   };
@@ -78,6 +85,7 @@ export interface LanguageAnalysis {
   recentFit: TrendFit | null;
   recentTrend: TrendPercent | null;
   recentWeeks: number;
+  recentFrom: string | null;
   reversal: ReversalInput | null;
   yoy: YoyResult;
   level: Summary;
@@ -236,6 +244,7 @@ export async function analyzeLanguage(
     recentFit,
     recentTrend,
     recentWeeks: recentValues.length,
+    recentFrom: recentFit ? (primaryWeekly.dates[recentStart] ?? null) : null,
     reversal,
     yoy,
     level,
@@ -277,12 +286,15 @@ export async function runAnalyze(args: AnalyzeArgs): Promise<AnalyzeOutput> {
     file,
     JSON.stringify(
       {
+        schema: ARTIFACT_SCHEMA,
+        kind: 'analyze',
         qid: args.qid,
         lang: args.lang,
         project: analysis.project,
         title: analysis.title,
         from: args.from,
         to: args.to,
+        days: analysis.days,
         unit: analysis.unit,
         analysedAt: new Date().toISOString(),
         primary: analysis.primary,
@@ -290,7 +302,12 @@ export async function runAnalyze(args: AnalyzeArgs): Promise<AnalyzeOutput> {
         relativeTrend: analysis.relativeTrend ? trendReport(analysis.fit, analysis.relativeTrend) : null,
         recentTrend:
           analysis.recentFit && analysis.recentTrend
-            ? { ...trendReport(analysis.recentFit, analysis.recentTrend), weeks: analysis.recentWeeks }
+            ? {
+                ...trendReport(analysis.recentFit, analysis.recentTrend),
+                weeks: analysis.recentWeeks,
+                from: analysis.recentFrom,
+                startWeek: analysis.weekly.weeks - analysis.recentWeeks,
+              }
             : null,
         reversal: analysis.reversal,
         yoy: analysis.yoy,
@@ -344,7 +361,7 @@ export async function runAnalyze(args: AnalyzeArgs): Promise<AnalyzeOutput> {
         ? {
             ...trendReport(analysis.recentFit, analysis.recentTrend),
             weeks: analysis.recentWeeks,
-            from: analysis.weekly.dates[analysis.weekly.dates.length - analysis.recentWeeks] ?? args.from,
+            from: analysis.recentFrom ?? args.from,
           }
         : null,
     yoy: {

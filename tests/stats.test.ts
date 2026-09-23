@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { aggregateWeekly } from '../src/lib/normalize.js';
 import {
+  FLAT_BAND_PERCENT,
   WEEKS_PER_YEAR,
   detectOutliers,
   mad,
@@ -11,6 +12,7 @@ import {
   summarize,
   theilSen,
   toPoints,
+  trendDirection,
   trendPercentPerYear,
   yoyChange,
 } from '../src/lib/stats.js';
@@ -258,5 +260,35 @@ describe('aggregateWeekly', () => {
     expect(weekly.weeks).toBe(2);
     expect(weekly.daysDropped).toBe(3);
     expect(weekly.dates).toEqual(['2023-09-01', '2023-09-08']);
+  });
+});
+
+describe('trendDirection', () => {
+  it('calls the reviewed +6.9% [-4.6, 16] case inconclusive, not growth', () => {
+    expect(trendDirection([-4.6, 16])).toBe('inconclusive');
+  });
+
+  it('reports up and down only when the interval clears zero', () => {
+    expect(trendDirection([2, 8])).toBe('up');
+    expect(trendDirection([-8, -2])).toBe('down');
+    expect(trendDirection([0, 8])).not.toBe('up');
+  });
+
+  it('reports flat only when the interval is narrow enough to rule out a meaningful change', () => {
+    expect(trendDirection([-3, 4])).toBe('flat');
+    expect(trendDirection([-FLAT_BAND_PERCENT, FLAT_BAND_PERCENT])).toBe('flat');
+    expect(trendDirection([-FLAT_BAND_PERCENT - 0.1, 2])).toBe('inconclusive');
+  });
+
+  it('treats a missing interval as inconclusive', () => {
+    expect(trendDirection(null)).toBe('inconclusive');
+  });
+
+  it('is attached to every trend the fit produces', () => {
+    const rising = noisy(730, (index) => 100 + (30 * index) / 365, 3);
+    const flat = noisy(730, () => 100, 1, 8);
+
+    expect(trendPercentPerYear(theilSen(toPoints(rising)), rising).direction).toBe('up');
+    expect(trendPercentPerYear(theilSen(toPoints(flat)), flat).direction).toBe('flat');
   });
 });

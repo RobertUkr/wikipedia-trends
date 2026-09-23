@@ -1,4 +1,4 @@
-import type { Message, MessageCode } from '../types.js';
+import type { Message, MessageCode, MessageParam } from '../types.js';
 
 export type Locale = 'en' | 'uk';
 
@@ -6,6 +6,50 @@ export const LOCALES: Locale[] = ['en', 'uk'];
 export const DEFAULT_LOCALE: Locale = 'en';
 
 const EN: Record<MessageCode, string> = {
+  DIRECTION_UP: 'growing',
+  DIRECTION_DOWN: 'declining',
+  DIRECTION_FLAT: 'stable',
+  DIRECTION_INCONCLUSIVE: 'no clear direction',
+  CONFIDENCE_LOW: 'low',
+  CONFIDENCE_MEDIUM: 'medium',
+  CONFIDENCE_HIGH: 'high',
+  HEADLINE_SINGLE:
+    'Interest in {topic} ({lang}): {direction} over the period, {recent} in recent weeks; confidence {confidence}.',
+  HEADLINE_GROWING:
+    'Interest in {topic} is growing in {langs}; {leader} leads at {percent}%/year relative to edition traffic, ' +
+    '{recent} in recent weeks, confidence {confidence}.',
+  HEADLINE_ALL_DOWN:
+    'Interest in {topic} is declining in every compared language ({langs}); {leader} declines slowest at ' +
+    '{percent}%/year, {recent} in recent weeks.',
+  HEADLINE_NO_CLEAR_DIRECTION:
+    'The data shows no clear direction of interest in {topic} across {langs}, so no language can be recommended on ' +
+    'this evidence.',
+  HEADLINE_MIXED_DOWN: 'Interest in {topic} is declining in {down}; in {others} there is no clear change.',
+  REPORT_SUBTITLE: 'Languages: {langs} · {from} — {to}',
+  REPORT_TABLE_LANG: 'Language',
+  REPORT_TABLE_RELATIVE: 'Trend, share of edition',
+  REPORT_TABLE_CI: '95% interval',
+  REPORT_TABLE_RECENT: 'Recent trend',
+  REPORT_TABLE_MEDIAN: 'Median per million',
+  REPORT_TABLE_CONFIDENCE: 'Confidence',
+  REPORT_TREND_CELL: '{direction} ({percent}%/yr)',
+  REPORT_CAVEATS_TITLE: 'Caveats',
+  REPORT_MORE_CAVEATS: '{count} more caveat(s) are in the artifact file.',
+  REPORT_LANG_CAVEAT: '{lang}: {text}',
+  REPORT_CHART_EXCLUDED: 'Not plotted, raw counts only: {langs}.',
+  REPORT_FOOTER_SOURCE:
+    'Source: Wikimedia Pageviews API (agent=user, access=all-access), normalised by total edition traffic.',
+  REPORT_FOOTER_GENERATED: 'Generated {date}',
+  REPORT_FOOTER_RANGE: 'Range {from} — {to} ({days} days)',
+  REPORT_FOOTER_MISSING: 'Missing days, interpolated: {detail}',
+  REPORT_FOOTER_NO_MISSING: 'No missing days.',
+  CHART_Y_LABEL: 'views per million of edition traffic',
+  CHART_LEGEND_RAW: 'daily',
+  CHART_LEGEND_SMOOTHED: '7-day average',
+  CHART_LEGEND_TREND: 'trend ±95%',
+  CHART_LEGEND_OUTLIERS: 'spike days',
+  CHART_RECENT_MARKER: 'recent period',
+  CHART_NO_DATA: 'no data',
   LOW_VOLUME:
     'Traffic is around {median} views a day. Below {floor} a day the counts are mostly noise; a trend becomes a ' +
     'usable signal closer to {ceiling} a day, so this one should not be read as a product signal on its own.',
@@ -79,6 +123,50 @@ const EN: Record<MessageCode, string> = {
 };
 
 const UK: Record<MessageCode, string> = {
+  DIRECTION_UP: 'зростає',
+  DIRECTION_DOWN: 'падає',
+  DIRECTION_FLAT: 'стабільний',
+  DIRECTION_INCONCLUSIVE: 'без ясного напрямку',
+  CONFIDENCE_LOW: 'низька',
+  CONFIDENCE_MEDIUM: 'середня',
+  CONFIDENCE_HIGH: 'висока',
+  HEADLINE_SINGLE:
+    'Інтерес до «{topic}» ({lang}): за період — {direction}, в останні тижні — {recent}; достовірність — {confidence}.',
+  HEADLINE_GROWING:
+    'Інтерес до «{topic}» зростає в: {langs}; лідер — {leader}, {percent}%/рік відносно трафіку розділу, ' +
+    'в останні тижні — {recent}, достовірність — {confidence}.',
+  HEADLINE_ALL_DOWN:
+    'Інтерес до «{topic}» падає в усіх порівнюваних мовах ({langs}); найповільніше — {leader}, {percent}%/рік, ' +
+    'в останні тижні — {recent}.',
+  HEADLINE_NO_CLEAR_DIRECTION:
+    'Дані не показують ясного напрямку інтересу до «{topic}» у мовах {langs}, тож жодну мову на цій підставі ' +
+    'рекомендувати не можна.',
+  HEADLINE_MIXED_DOWN: 'Інтерес до «{topic}» падає в: {down}; у {others} явної зміни немає.',
+  REPORT_SUBTITLE: 'Мови: {langs} · {from} — {to}',
+  REPORT_TABLE_LANG: 'Мова',
+  REPORT_TABLE_RELATIVE: 'Тренд, частка розділу',
+  REPORT_TABLE_CI: '95% інтервал',
+  REPORT_TABLE_RECENT: 'Поточний тренд',
+  REPORT_TABLE_MEDIAN: 'Медіана на млн',
+  REPORT_TABLE_CONFIDENCE: 'Достовірність',
+  REPORT_TREND_CELL: '{direction} ({percent}%/рік)',
+  REPORT_CAVEATS_TITLE: 'Застереження',
+  REPORT_MORE_CAVEATS: 'Ще {count} застережень — у файлі артефакту.',
+  REPORT_LANG_CAVEAT: '{lang}: {text}',
+  REPORT_CHART_EXCLUDED: 'Не показано на графіку, лише сирі перегляди: {langs}.',
+  REPORT_FOOTER_SOURCE:
+    'Джерело: Wikimedia Pageviews API (agent=user, access=all-access), нормалізовано на загальний трафік розділу.',
+  REPORT_FOOTER_GENERATED: 'Згенеровано {date}',
+  REPORT_FOOTER_RANGE: 'Діапазон {from} — {to} ({days} днів)',
+  REPORT_FOOTER_MISSING: 'Пропущені дні, інтерпольовано: {detail}',
+  REPORT_FOOTER_NO_MISSING: 'Пропущених днів немає.',
+  CHART_Y_LABEL: 'перегляди на мільйон трафіку розділу',
+  CHART_LEGEND_RAW: 'щоденно',
+  CHART_LEGEND_SMOOTHED: 'середнє за 7 днів',
+  CHART_LEGEND_TREND: 'тренд ±95%',
+  CHART_LEGEND_OUTLIERS: 'дні-сплески',
+  CHART_RECENT_MARKER: 'поточний період',
+  CHART_NO_DATA: 'немає даних',
   LOW_VOLUME:
     'Трафік — близько {median} переглядів на день. Нижче {floor} на день це переважно шум; сигналом тренд стає ' +
     'ближче до {ceiling} на день, тож самостійно цей результат не можна читати як продуктовий сигнал.',
@@ -162,7 +250,11 @@ export function render(message: Message, locale: Locale = DEFAULT_LOCALE): strin
   return template.replace(/\{(\w+)\}/g, (placeholder, key: string) => {
     const value = message.params[key];
 
-    return value === undefined ? placeholder : String(value);
+    if (value === undefined) {
+      return placeholder;
+    }
+
+    return typeof value === 'object' ? render(value, locale) : String(value);
   });
 }
 
@@ -170,6 +262,6 @@ export function renderAll(messages: Message[], locale: Locale = DEFAULT_LOCALE):
   return messages.map((message) => render(message, locale));
 }
 
-export function message(code: MessageCode, params: Record<string, string | number> = {}): Message {
+export function message(code: MessageCode, params: Record<string, MessageParam> = {}): Message {
   return { code, params };
 }

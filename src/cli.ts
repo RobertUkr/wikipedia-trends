@@ -3,6 +3,7 @@ import { parseArgs } from 'node:util';
 import { runAnalyze } from './commands/analyze.js';
 import { runCompare } from './commands/compare.js';
 import { runFetch } from './commands/fetch.js';
+import { runReport } from './commands/report.js';
 import { runResolve } from './commands/resolve.js';
 import { isLocale } from './lib/messages.js';
 import type { Locale } from './lib/messages.js';
@@ -15,6 +16,7 @@ const USAGE = {
   fetch: 'fetch --qid Q123 --langs pl,cs --from YYYY-MM-DD --to YYYY-MM-DD [--no-cache] [--out path.json]',
   analyze: 'analyze --qid Q123 --lang cs --from YYYY-MM-DD --to YYYY-MM-DD [--locale uk] [--no-cache] [--out path.json]',
   compare: 'compare --qid Q123 --langs cs,uk --from YYYY-MM-DD --to YYYY-MM-DD [--locale uk] [--no-cache] [--out path.json]',
+  report: 'report --qid Q123 --langs en,de,uk --from YYYY-MM-DD --to YYYY-MM-DD [--locale uk|en] [--artifact path.json]',
 };
 
 function render(value: unknown, depth: number, indent: string, cutoff: number): string {
@@ -211,6 +213,39 @@ async function main(): Promise<void> {
         noCache: values['no-cache'] === true,
         out: values.out ? resolvePath(process.cwd(), values.out) : null,
         locale: parseLocale(values.locale),
+      }),
+    );
+
+    return;
+  }
+
+  if (command === 'report') {
+    const { values } = parseArgs({
+      args: rest,
+      options: {
+        qid: { type: 'string' },
+        langs: { type: 'string' },
+        from: { type: 'string' },
+        to: { type: 'string' },
+        locale: { type: 'string' },
+        artifact: { type: 'string' },
+        'no-cache': { type: 'boolean', default: false },
+      },
+    });
+
+    if (!values.qid || !values.langs || !values.from || !values.to) {
+      throw new SkillError('InvalidInput', `Usage: ${USAGE.report}`);
+    }
+
+    print(
+      await runReport({
+        qid: values.qid,
+        langs: splitLangs(values.langs),
+        from: values.from,
+        to: values.to,
+        locale: parseLocale(values.locale) ?? 'uk',
+        artifact: values.artifact ? resolvePath(process.cwd(), values.artifact) : null,
+        noCache: values['no-cache'] === true,
       }),
     );
 

@@ -32,7 +32,18 @@ node dist/cli.js resolve --topic "інтервальне голодування"
 node dist/cli.js fetch   --qid Q1666254 --langs de,cs --from 2023-09-01 --to 2025-09-01 [--no-cache] [--out file.json]
 node dist/cli.js analyze --qid Q1666254 --lang cs --from 2023-09-01 --to 2026-09-01 [--locale uk]
 node dist/cli.js compare --qid Q1666254 --langs cs,uk --from 2023-09-01 --to 2026-09-01 [--locale uk]
+node dist/cli.js report  --qid Q11660 --langs en,de,uk --from 2023-09-01 --to 2026-09-01 [--locale uk|en]
 ```
+
+`report` будує одностраничний PDF і SVG-графік з артефакту `analyze`/`compare`
+в `output/`. Якщо артефакт є і його схема актуальна, мережа не використовується;
+інакше артефакт спершу перегенеровується. Кожен тренд має `direction`:
+`up`/`down` — інтервал не містить нуля, `flat` — містить нуль і вкладається
+в ±5%/рік, `inconclusive` — містить нуль і ширший. У звіті показується саме
+напрямок, а не голе число.
+
+Шрифти DejaVu Sans лежать в `assets/fonts/` (ліцензія поруч): вбудовані
+шрифти pdfkit не мають кирилиці.
 
 `resolve` шукає тему у Wikidata й повертає Q-ID та заголовки статей у всіх мовних
 розділах. Якщо кілька кандидатів мають близький скор — повертає їх у `candidates`

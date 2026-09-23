@@ -188,11 +188,38 @@ function quantileSorted(sorted: Float64Array, q: number): number {
   return low + (high - low) * (position - lower);
 }
 
+export type Direction = 'up' | 'down' | 'flat' | 'inconclusive';
+
+export const FLAT_BAND_PERCENT = 5;
+
 export interface TrendPercent {
   percentPerYear: number | null;
   ci95: [number, number] | null;
+  direction: Direction;
   baseline: number;
   baselineSource: 'intercept' | 'median' | 'none';
+}
+
+export function trendDirection(ci95: [number, number] | null): Direction {
+  if (ci95 === null) {
+    return 'inconclusive';
+  }
+
+  const [low, high] = ci95;
+
+  if (low > 0) {
+    return 'up';
+  }
+
+  if (high < 0) {
+    return 'down';
+  }
+
+  if (low >= -FLAT_BAND_PERCENT && high <= FLAT_BAND_PERCENT) {
+    return 'flat';
+  }
+
+  return 'inconclusive';
 }
 
 export function trendPercentPerYear(
@@ -202,32 +229,23 @@ export function trendPercentPerYear(
 ): TrendPercent {
   const fromIntercept = fit.intercept;
   const fromMedian = median(values);
+  const baseline = fromIntercept > 0 ? fromIntercept : fromMedian;
+  const baselineSource = fromIntercept > 0 ? 'intercept' : fromMedian > 0 ? 'median' : 'none';
 
-  if (fromIntercept > 0) {
-    return {
-      percentPerYear: round1((fit.slope * periodsPerYear * 100) / fromIntercept),
-      ci95: [
-        round1((fit.ci95[0] * periodsPerYear * 100) / fromIntercept),
-        round1((fit.ci95[1] * periodsPerYear * 100) / fromIntercept),
-      ],
-      baseline: fromIntercept,
-      baselineSource: 'intercept',
-    };
+  if (baseline <= 0) {
+    return { percentPerYear: null, ci95: null, direction: 'inconclusive', baseline: 0, baselineSource: 'none' };
   }
 
-  if (fromMedian > 0) {
-    return {
-      percentPerYear: round1((fit.slope * periodsPerYear * 100) / fromMedian),
-      ci95: [
-        round1((fit.ci95[0] * periodsPerYear * 100) / fromMedian),
-        round1((fit.ci95[1] * periodsPerYear * 100) / fromMedian),
-      ],
-      baseline: fromMedian,
-      baselineSource: 'median',
-    };
-  }
+  const scale = (slope: number) => round1((slope * periodsPerYear * 100) / baseline);
+  const ci95: [number, number] = [scale(fit.ci95[0]), scale(fit.ci95[1])];
 
-  return { percentPerYear: null, ci95: null, baseline: 0, baselineSource: 'none' };
+  return {
+    percentPerYear: scale(fit.slope),
+    ci95,
+    direction: trendDirection(ci95),
+    baseline,
+    baselineSource,
+  };
 }
 
 function round1(value: number): number {

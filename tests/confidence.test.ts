@@ -173,6 +173,17 @@ describe('two trends', () => {
     expect(codes(report.caveats)).not.toContain('ABSOLUTE_VS_RELATIVE');
   });
 
+  it('does not claim the share holds when the relative interval is merely wide', () => {
+    const report = assessConfidence(
+      input({
+        trends: { absolutePercent: -19.3, absoluteCi: [-25, -14], relativePercent: -9, relativeCi: [-34.9, 2.7] },
+      }),
+    );
+
+    expect(codes(report.caveats)).not.toContain('EDITION_TRAFFIC_DECLINING');
+    expect(codes(report.caveats)).toContain('ABSOLUTE_VS_RELATIVE');
+  });
+
   it('says nothing about two trends when only raw counts exist', () => {
     const report = assessConfidence(
       input({

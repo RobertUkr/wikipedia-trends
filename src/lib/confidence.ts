@@ -1,5 +1,5 @@
 import { message } from './messages.js';
-import { theilSen, toPoints } from './stats.js';
+import { theilSen, toPoints, trendDirection } from './stats.js';
 import type { Message } from '../types.js';
 
 export const VOLUME_FLOOR = 20;
@@ -266,8 +266,8 @@ export function buildCaveats(
   }
 
   if (input.trends && input.trends.relativePercent !== null && input.trends.absolutePercent !== null) {
-    const absoluteFalling = (input.trends.absoluteCi?.[1] ?? 0) < 0;
-    const relativeHolding = (input.trends.relativeCi?.[0] ?? 0) <= 0 && (input.trends.relativeCi?.[1] ?? 0) >= 0;
+    const absoluteFalling = trendDirection(input.trends.absoluteCi) === 'down';
+    const relativeHolding = trendDirection(input.trends.relativeCi) === 'flat';
 
     caveats.push(
       absoluteFalling && relativeHolding

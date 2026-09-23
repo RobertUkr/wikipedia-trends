@@ -2,12 +2,15 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { cacheKey, outputDir, readCache, writeCache } from '../lib/cache.js';
 import { message } from '../lib/messages.js';
+import { enumerateDates } from '../lib/normalize.js';
 import { getSitelinks, probeLanguages } from '../lib/wikidata.js';
-import { getArticleViews, normalizeProject, toApiDate } from '../lib/wikimedia.js';
+import { getArticleViews, getProjectTotals, normalizeProject, toApiDate } from '../lib/wikimedia.js';
 import { ACCESS, AGENT, ArticleNotFound, GRANULARITY, SkillError } from '../types.js';
-import type { ArticleViews, DailyPoint, Lang, LanguageAvailability } from '../types.js';
+import type { ArticleViews, DailyPoint, Lang, LanguageAvailability, ProjectTotals } from '../types.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+export { enumerateDates };
 
 export interface FetchArgs {
   qid: string;
@@ -53,15 +56,7 @@ export interface FetchOutput {
   unavailable: LanguageAvailability[];
 }
 
-export function enumerateDates(from: string, to: string): string[] {
-  const start = Date.parse(`${from}T00:00:00Z`);
-  const end = Date.parse(`${to}T00:00:00Z`);
-  const dates: string[] = [];
-  for (let cursor = start; cursor <= end; cursor += DAY_MS) {
-    dates.push(new Date(cursor).toISOString().slice(0, 10));
-  }
-  return dates;
-}
+
 
 export function summarizeSeries(points: DailyPoint[], from: string, to: string): SeriesSummary {
   const expected = enumerateDates(from, to);
@@ -107,7 +102,7 @@ function validateRange(from: string, to: string): void {
   }
 }
 
-async function loadSeries(
+export async function loadSeries(
   project: string,
   title: string,
   from: string,
@@ -126,6 +121,28 @@ async function loadSeries(
   const views = await getArticleViews(project, title, from, to);
   await writeCache(key, views);
   return { views, cached: false };
+}
+
+export async function loadTotals(
+  project: string,
+  from: string,
+  to: string,
+  noCache: boolean,
+): Promise<{ totals: ProjectTotals; cached: boolean }> {
+  const key = cacheKey({ kind: 'totals', project, start: from, end: to, access: ACCESS, agent: AGENT });
+
+  if (!noCache) {
+    const cached = await readCache<ProjectTotals>(key);
+
+    if (cached) {
+      return { totals: cached, cached: true };
+    }
+  }
+
+  const totals = await getProjectTotals(project, from, to);
+  await writeCache(key, totals);
+
+  return { totals, cached: false };
 }
 
 export async function runFetch(args: FetchArgs): Promise<FetchOutput> {

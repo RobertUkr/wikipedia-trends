@@ -11,7 +11,7 @@ describe('dictionaries', () => {
     const [first, ...rest] = LOCALES;
     const reference = Object.keys(DICTIONARIES[first as Locale]).sort();
 
-    expect(reference.length).toBeGreaterThan(5);
+    expect(reference.length).toBeGreaterThan(30);
 
     for (const locale of rest) {
       expect(Object.keys(DICTIONARIES[locale]).sort()).toEqual(reference);
@@ -37,34 +37,26 @@ describe('dictionaries', () => {
 
 describe('render', () => {
   it('substitutes parameters in both locales', () => {
-    const reason = message('NO_ARTICLE_WITH_MENTIONS', { project: 'pl.wikipedia.org', query: 'post', hits: 6 });
+    const caveat = message('LOW_VOLUME', { median: 6, floor: 20, ceiling: 500 });
 
-    expect(render(reason, 'en')).toContain('mentions "post" in 6 article(s)');
-    expect(render(reason, 'uk')).toContain('згадує «post» у 6 статтях');
-    expect(render(reason, 'uk')).not.toContain('{');
+    expect(render(caveat, 'en')).toContain('around 6 views a day');
+    expect(render(caveat, 'uk')).toContain('близько 6 переглядів на день');
+    expect(render(caveat, 'uk')).not.toContain('{');
   });
 
   it('defaults to English', () => {
-    const reason = message('SEARCH_FAILED', { project: 'pl.wikipedia.org', error: 'timeout' });
-
-    expect(render(reason)).toBe('Search on pl.wikipedia.org failed: timeout');
+    expect(render(message('NOTE_SPANS_ZERO'))).toBe(DICTIONARIES.en.NOTE_SPANS_ZERO);
   });
 
   it('leaves a placeholder visible when the parameter is missing instead of printing undefined', () => {
-    expect(render({ code: 'NO_ARTICLE_NO_HITS', params: {} }, 'en')).toContain('{project}');
+    expect(render({ code: 'GAPS_INTERPOLATED', params: {} }, 'en')).toContain('{days}');
   });
 
   it('renders a whole list', () => {
-    const rendered = renderAll(
-      [
-        message('NO_ARTICLE_NO_HITS', { project: 'pl.wikipedia.org', query: 'post' }),
-        message('POSSIBLE_ALTERNATIVE', { project: 'pl.wikipedia.org', title: 'Post' }),
-      ],
-      'uk',
-    );
+    const rendered = renderAll([message('NOTE_SPANS_ZERO'), message('NOTE_LOW_CONFIDENCE')], 'uk');
 
     expect(rendered).toHaveLength(2);
-    expect(rendered[1]).toContain('Не підтверджено');
+    expect(rendered[0]).toContain('нуль');
   });
 });
 

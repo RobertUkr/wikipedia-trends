@@ -16,6 +16,8 @@ const DEFAULT_BASE_DELAY_MS = 500;
 const DEFAULT_MAX_DELAY_MS = 30_000;
 // One request per 300 ms caps the rate at 200/minute, Wikimedia's limit for a client with a compliant User-Agent.
 const DEFAULT_MIN_INTERVAL_MS = 300;
+// Without a contact the client is in the anonymous tier of about 10 requests/minute: one per 6 s avoids a 429 storm.
+const ANONYMOUS_MIN_INTERVAL_MS = 6000;
 const DEFAULT_TIMEOUT_MS = 20_000;
 
 /** Per-call overrides of retry, pacing and timeout settings. */
@@ -27,36 +29,35 @@ export interface RequestOptions {
   timeoutMs?: number;
 }
 
-/** Contact put in the User-Agent when WIKIMEDIA_CONTACT is not set; forks should set their own. */
-export const DEFAULT_CONTACT = 'https://github.com/RobertUkr';
-
-/** Contact for the User-Agent and whether it came from WIKIMEDIA_CONTACT or the default. */
-export function contact(): { value: string; source: 'env' | 'default' } {
-  const configured = process.env['WIKIMEDIA_CONTACT']?.trim();
-
-  if (configured) {
-    return { value: configured, source: 'env' };
-  }
-
-  return { value: DEFAULT_CONTACT, source: 'default' };
+/** Contact from WIKIMEDIA_CONTACT for the User-Agent, or null when it is not set; there is no built-in default. */
+export function contact(): string | null {
+  return process.env['WIKIMEDIA_CONTACT']?.trim() || null;
 }
 
-/** Warning to print when the default contact is in use, or null when WIKIMEDIA_CONTACT is set. */
+/** Warning to print when no contact is set, or null when WIKIMEDIA_CONTACT is set. */
 export function contactWarning(): string | null {
-  if (contact().source === 'env') {
+  if (contact()) {
     return null;
   }
 
   return (
-    `WIKIMEDIA_CONTACT is not set; requests identify themselves with the default contact ${DEFAULT_CONTACT}. ` +
-    'Set it to your own email or URL if you run a fork or a larger volume.'
+    'WIKIMEDIA_CONTACT is not set; requests carry no contact, so Wikimedia allows about 10 per minute and the CLI ' +
+    'waits 6 s between them. Set it to your email or URL for about 200 per minute.'
   );
 }
 
-/** User-Agent with tool name, version and contact, as Wikimedia's User-Agent policy requires.
- * Without a contact the client can fall into the anonymous tier of about 10 requests/minute. */
+/** User-Agent with tool name, version and, when set, the contact that Wikimedia's User-Agent policy asks for. */
 export function userAgent(): string {
-  return `wikipedia-trends/${VERSION} (${contact().value}) node/${process.versions.node}`;
+  const value = contact();
+
+  return value
+    ? `wikipedia-trends/${VERSION} (${value}) node/${process.versions.node}`
+    : `wikipedia-trends/${VERSION} node/${process.versions.node}`;
+}
+
+/** Default pause between requests: the compliant tier with a contact, the anonymous tier without one. */
+export function defaultMinIntervalMs(): number {
+  return contact() ? DEFAULT_MIN_INTERVAL_MS : ANONYMOUS_MIN_INTERVAL_MS;
 }
 
 /** Project host for a language code or URL, e.g. "uk" -> "uk.wikipedia.org". */
@@ -135,7 +136,7 @@ function isRetryable(status: number): boolean {
 /** GETs JSON one request at a time, with pacing, a timeout and retries on network errors, 429 and 5xx. */
 export async function requestJson<T>(url: string, opts: RequestOptions = {}): Promise<T> {
   const retries = opts.retries ?? DEFAULT_RETRIES;
-  const minInterval = opts.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS;
+  const minInterval = opts.minIntervalMs ?? defaultMinIntervalMs();
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   return serial(async () => {

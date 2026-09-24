@@ -9,7 +9,7 @@ import {
   getRedirectsTo,
   normalizeProject,
   projectTotalsUrl,
-  DEFAULT_CONTACT,
+  defaultMinIntervalMs,
   contactWarning,
   searchArticles,
   stripMarkup,
@@ -77,29 +77,37 @@ describe('url building', () => {
 });
 
 describe('userAgent', () => {
+  const configured = process.env['WIKIMEDIA_CONTACT'];
+
+  afterEach(() => {
+    if (configured === undefined) {
+      delete process.env['WIKIMEDIA_CONTACT'];
+    } else {
+      process.env['WIKIMEDIA_CONTACT'] = configured;
+    }
+  });
+
   it('carries a contact from the environment and says nothing', () => {
     process.env['WIKIMEDIA_CONTACT'] = 'team@example.com';
 
     expect(userAgent()).toContain('(team@example.com)');
     expect(contactWarning()).toBeNull();
-
-    delete process.env['WIKIMEDIA_CONTACT'];
+    expect(defaultMinIntervalMs()).toBe(300);
   });
 
-  it('always carries a real contact, and warns when it is only the default', () => {
+  it('has no built-in contact: without one it names only the tool, warns and slows to the anonymous tier', () => {
     delete process.env['WIKIMEDIA_CONTACT'];
 
-    expect(userAgent()).toContain(`(${DEFAULT_CONTACT})`);
-    expect(DEFAULT_CONTACT).toMatch(/^https:\/\/github\.com\/\w+/);
+    expect(userAgent()).toMatch(/^wikipedia-trends\/[\d.]+ node\/[\d.]+$/);
     expect(contactWarning()).toContain('WIKIMEDIA_CONTACT is not set');
+    expect(defaultMinIntervalMs()).toBe(6000);
   });
 
-  it('ignores a blank value', () => {
+  it('treats a blank value as no contact', () => {
     process.env['WIKIMEDIA_CONTACT'] = '   ';
 
-    expect(userAgent()).toContain(DEFAULT_CONTACT);
-
-    delete process.env['WIKIMEDIA_CONTACT'];
+    expect(userAgent()).not.toContain('(');
+    expect(contactWarning()).not.toBeNull();
   });
 });
 

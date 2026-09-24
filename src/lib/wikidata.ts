@@ -15,6 +15,7 @@ const API = 'https://www.wikidata.org/w/api.php';
 const SEARCH_LIMIT = 7;
 const INSPECT_LIMIT = 5;
 const AMBIGUITY_DELTA = 0.12;
+const NOTABILITY_RATIO = 0.2;
 const SEARCH_HITS = 5;
 const ALTERNATIVE_MIN_SCORE = 0.5;
 
@@ -201,8 +202,9 @@ export async function resolveTopic(
     }))
     .filter((candidate) => candidate.wikiCount > 0);
 
-  const best = candidates[0];
-  if (!best) {
+  const top = candidates[0];
+
+  if (!top) {
     throw new SkillError(
       'NoSitelink',
       `No Wikidata item matching "${trimmed}" has Wikipedia articles`,
@@ -210,7 +212,12 @@ export async function resolveTopic(
     );
   }
 
-  const close = candidates.filter((candidate) => best.score - candidate.score <= AMBIGUITY_DELTA);
+  const byScore = candidates.filter((candidate) => top.score - candidate.score <= AMBIGUITY_DELTA);
+  const mostLinked = Math.max(...byScore.map((candidate) => candidate.wikiCount));
+  const close = byScore
+    .filter((candidate) => candidate.wikiCount >= mostLinked * NOTABILITY_RATIO)
+    .sort((a, b) => b.score - a.score || b.wikiCount - a.wikiCount);
+  const best = close[0] ?? top;
 
   return {
     qid: best.qid,

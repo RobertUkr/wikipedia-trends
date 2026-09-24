@@ -22,9 +22,14 @@ Node 20, TypeScript, vitest. Залежності мінімальні —
 
 ## Структура
 
+SKILL.md — роутер для агента (компактний, читається кожною сесією)
+references/ — методологія, інтерпретація, нотатки про API (читаються за потреби)
+scripts/setup.sh — ідемпотентне встановлення
 src/cli.ts — точка входу, підкоманди
-src/commands/ — resolve, fetch, analyze, compare, report
+src/commands/ — research, resolve, fetch, analyze, compare, report
 src/lib/ — уся змістовна логіка
 tests/ — vitest
+evals/ — прогін сценаріїв на швидкій моделі (витрачає токени)
+assets/fonts/ — DejaVu Sans для кирилиці в PDF
 output/ — згенеровані артефакти (в .gitignore)
 .cache/ — кеш HTTP-відповідей (в .gitignore)

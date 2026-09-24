@@ -117,6 +117,37 @@ describe('resolveTopic', () => {
     expect(result.candidates[0]?.wikiCount).toBe(1);
   });
 
+  it('does not treat an obscure namesake as a real alternative', async () => {
+    const many = Object.fromEntries(Array.from({ length: 250 }, (_, index) => [`l${index}wiki`, `Astronomy ${index}`]));
+
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          json({
+            search: [
+              { id: 'Q12012641', label: 'Астрономія', description: 'fictional class at Hogwarts', match: { type: 'label', text: 'Астрономія' } },
+              { id: 'Q333', label: 'астрономія', description: 'наука', match: { type: 'label', text: 'астрономія' } },
+            ],
+          }),
+        )
+        .mockResolvedValueOnce(
+          json({
+            entities: {
+              Q12012641: { sitelinks: sitelinks({ enwiki: 'Astronomy (Harry Potter)', dewiki: 'Astronomie (HP)' }) },
+              Q333: { sitelinks: sitelinks(many) },
+            },
+          }),
+        ),
+    );
+
+    const result = await resolveTopic('астрономія', 'uk', FAST);
+
+    expect(result.qid).toBe('Q333');
+    expect(result.candidates).toEqual([]);
+  });
+
   it('skips items without Wikipedia articles', async () => {
     vi.stubGlobal(
       'fetch',

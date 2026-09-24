@@ -6,6 +6,32 @@ export const LOCALES: Locale[] = ['en', 'uk'];
 export const DEFAULT_LOCALE: Locale = 'en';
 
 const EN: Record<MessageCode, string> = {
+  TRUST_LOW:
+    'Trust ({lang}): confidence is low; the weakest part is {weakest}: {detail}. Do not base a decision on this ' +
+    'alone.',
+  TRUST_MEDIUM:
+    'Trust ({lang}): confidence is medium; the weakest part is {weakest}: {detail}. Usable as a direction, not as ' +
+    'an exact number.',
+  TRUST_HIGH:
+    'Trust ({lang}): confidence is high; the weakest part is {weakest}: {detail}. The direction is robust in this ' +
+    'data, but it measures attention, not demand.',
+  COMPONENT_VOLUME: 'traffic volume',
+  COMPONENT_LENGTH: 'series length',
+  COMPONENT_STABILITY: 'stability of the direction',
+  COMPONENT_OUTLIERS: 'share of spike days',
+  COMPONENT_CONTINUITY: 'continuity of the data',
+  RECOMMEND_LANGUAGE:
+    'Recommendation: {lang} — interest is growing ({percent}%/year relative to edition traffic), confidence ' +
+    '{confidence}.',
+  RECOMMEND_NONE_ALL_DOWN:
+    'Recommendation: no language can be recommended on this evidence — interest declines in all of them; {leader} ' +
+    'declines slowest ({percent}%/year), which is still a decline, not growth.',
+  RECOMMEND_NONE_LOW_CONFIDENCE:
+    'Recommendation: interest grows only where confidence is low ({langs}), so no language can be recommended on ' +
+    'this evidence.',
+  RECOMMEND_NONE_NO_DIRECTION:
+    'Recommendation: no language shows growing interest, so no language can be recommended on this evidence.',
+  RESEARCH_CANDIDATE: '{qid}: {label} — {description}',
   DIRECTION_UP: 'growing',
   DIRECTION_DOWN: 'declining',
   DIRECTION_FLAT: 'stable',
@@ -14,7 +40,8 @@ const EN: Record<MessageCode, string> = {
   CONFIDENCE_MEDIUM: 'medium',
   CONFIDENCE_HIGH: 'high',
   HEADLINE_SINGLE:
-    'Interest in {topic} ({lang}): {direction} over the period, {recent} in recent weeks; confidence {confidence}.',
+    'Interest in {topic} ({lang}): {direction} over the period ({percent}%/year, 95% [{low}; {high}]), {recent} in ' +
+    'recent weeks ({recentPercent}%/year); confidence {confidence}.',
   HEADLINE_GROWING:
     'Interest in {topic} is growing in {langs}; {leader} leads at {percent}%/year relative to edition traffic, ' +
     '{recent} in recent weeks, confidence {confidence}.',
@@ -25,6 +52,15 @@ const EN: Record<MessageCode, string> = {
     'The data shows no clear direction of interest in {topic} across {langs}, so no language can be recommended on ' +
     'this evidence.',
   HEADLINE_MIXED_DOWN: 'Interest in {topic} is declining in {down}; in {others} there is no clear change.',
+  RESEARCH_LANGUAGE_LINE:
+    '{lang}: {direction} ({percent}%/yr, 95% [{low}; {high}]); recent weeks: {recent} ({recentPercent}%/yr); ' +
+    'confidence {confidence}',
+  RESEARCH_NEEDS_CHOICE:
+    '"{topic}" matches several Wikidata items. Ask the user which one is meant, then rerun research with --qid.',
+  RESEARCH_NO_ARTICLES: 'None of the requested language editions ({langs}) has an article about "{topic}".',
+  RESEARCH_UNAVAILABLE_TITLE: 'Languages without data',
+  RESEARCH_REPORT_LINE: 'PDF report: {path}',
+  RESEARCH_MORE_CAVEATS: '{count} more caveat(s) are in the PDF.',
   REPORT_SUBTITLE: 'Languages: {langs} · {from} — {to}',
   REPORT_TABLE_LANG: 'Language',
   REPORT_TABLE_RELATIVE: 'Trend, share of edition',
@@ -70,10 +106,10 @@ const EN: Record<MessageCode, string> = {
   WEEKLY_AGGREGATION:
     'The trend is fitted on {weeks} weekly sums rather than {days} daily values, because daily pageviews are ' +
     'autocorrelated and a daily fit reports an interval narrower than the real uncertainty.',
-  ABSOLUTE_VS_RELATIVE:
-    'Two trends are reported: raw views move {absolute}%/year, the share of edition traffic moves {relative}%/year. ' +
-    'The relative one is the measure of interest in the topic; the absolute one also carries whatever the edition ' +
-    'as a whole is doing.',
+  ABSOLUTE_VS_RELATIVE: 'Raw views {absolute}%/year, share of edition traffic {relative}%/year.',
+  TWO_TRENDS_EXPLAINED:
+    'The share of edition traffic is the measure of interest in the topic; raw views also carry whatever the ' +
+    'edition as a whole is doing.',
   EDITION_TRAFFIC_DECLINING:
     'Raw views fall {absolute}%/year while the share of edition traffic holds at {relative}%/year. That pattern means ' +
     'the edition is losing readers overall, not that interest in this topic is fading.',
@@ -87,7 +123,7 @@ const EN: Record<MessageCode, string> = {
   DETAIL_STABILITY_SPANS_ZERO:
     'the full-series interval spans zero, so no direction is claimed and subsample agreement is not required',
   DETAIL_STABILITY_TOO_SHORT: 'series too short to split into subsamples',
-  DETAIL_OUTLIERS: '{days} of {total} days removed as spikes (budget {budget}%)',
+  DETAIL_OUTLIERS: '{days} of {total} days removed as spikes, budget {budget}%',
   DETAIL_CONTINUITY: '{missing} missing days, longest gap {longest} days',
   ALL_LANGUAGES_DECLINING:
     'Every compared language is declining over this period. Rank 1 means the slowest decline, not growth, and the ' +
@@ -123,6 +159,31 @@ const EN: Record<MessageCode, string> = {
 };
 
 const UK: Record<MessageCode, string> = {
+  TRUST_LOW:
+    'Довіра ({lang}): достовірність низька, найслабша складова — {weakest}: {detail}. Самостійно рішення на цьому ' +
+    'ухвалювати не можна.',
+  TRUST_MEDIUM:
+    'Довіра ({lang}): достовірність середня, найслабша складова — {weakest}: {detail}. Придатне як напрямок, а не ' +
+    'як точне число.',
+  TRUST_HIGH:
+    'Довіра ({lang}): достовірність висока, найслабша складова — {weakest}: {detail}. Напрямок стійкий у межах ' +
+    'цих даних, але це увага, а не попит.',
+  COMPONENT_VOLUME: 'обсяг трафіку',
+  COMPONENT_LENGTH: 'довжина ряду',
+  COMPONENT_STABILITY: 'стабільність напрямку',
+  COMPONENT_OUTLIERS: 'частка днів-сплесків',
+  COMPONENT_CONTINUITY: 'неперервність даних',
+  RECOMMEND_LANGUAGE:
+    'Рекомендація: {lang} — інтерес зростає ({percent}%/рік відносно трафіку розділу), достовірність — {confidence}.',
+  RECOMMEND_NONE_ALL_DOWN:
+    'Рекомендація: на цих даних жодну мову рекомендувати не можна — інтерес падає в усіх; найповільніше падає ' +
+    '{leader} ({percent}%/рік), але це спад, а не ріст.',
+  RECOMMEND_NONE_LOW_CONFIDENCE:
+    'Рекомендація: інтерес зростає лише там, де достовірність низька ({langs}), тож рекомендувати мову на цій ' +
+    'підставі не можна.',
+  RECOMMEND_NONE_NO_DIRECTION:
+    'Рекомендація: жодна мова не показує зростання інтересу, тож рекомендувати мову на цій підставі не можна.',
+  RESEARCH_CANDIDATE: '{qid}: {label} — {description}',
   DIRECTION_UP: 'зростає',
   DIRECTION_DOWN: 'падає',
   DIRECTION_FLAT: 'стабільний',
@@ -131,7 +192,8 @@ const UK: Record<MessageCode, string> = {
   CONFIDENCE_MEDIUM: 'середня',
   CONFIDENCE_HIGH: 'висока',
   HEADLINE_SINGLE:
-    'Інтерес до «{topic}» ({lang}): за період — {direction}, в останні тижні — {recent}; достовірність — {confidence}.',
+    'Інтерес до «{topic}» ({lang}): за період — {direction} ({percent}%/рік, 95% [{low}; {high}]), в останні ' +
+    'тижні — {recent} ({recentPercent}%/рік); достовірність — {confidence}.',
   HEADLINE_GROWING:
     'Інтерес до «{topic}» зростає в: {langs}; лідер — {leader}, {percent}%/рік відносно трафіку розділу, ' +
     'в останні тижні — {recent}, достовірність — {confidence}.',
@@ -142,6 +204,16 @@ const UK: Record<MessageCode, string> = {
     'Дані не показують ясного напрямку інтересу до «{topic}» у мовах {langs}, тож жодну мову на цій підставі ' +
     'рекомендувати не можна.',
   HEADLINE_MIXED_DOWN: 'Інтерес до «{topic}» падає в: {down}; у {others} явної зміни немає.',
+  RESEARCH_LANGUAGE_LINE:
+    '{lang}: {direction} ({percent}%/рік, 95% [{low}; {high}]); останні тижні — {recent} ({recentPercent}%/рік); ' +
+    'достовірність — {confidence}',
+  RESEARCH_NEEDS_CHOICE:
+    '«{topic}» відповідає кільком обʼєктам Wikidata. Спитайте користувача, який саме мається на увазі, і повторіть ' +
+    'research з --qid.',
+  RESEARCH_NO_ARTICLES: 'Жоден із запитаних мовних розділів ({langs}) не має статті про «{topic}».',
+  RESEARCH_UNAVAILABLE_TITLE: 'Мови без даних',
+  RESEARCH_REPORT_LINE: 'PDF-звіт: {path}',
+  RESEARCH_MORE_CAVEATS: 'Решта застережень ({count}) — у PDF.',
   REPORT_SUBTITLE: 'Мови: {langs} · {from} — {to}',
   REPORT_TABLE_LANG: 'Мова',
   REPORT_TABLE_RELATIVE: 'Тренд, частка розділу',
@@ -151,7 +223,7 @@ const UK: Record<MessageCode, string> = {
   REPORT_TABLE_CONFIDENCE: 'Достовірність',
   REPORT_TREND_CELL: '{direction} ({percent}%/рік)',
   REPORT_CAVEATS_TITLE: 'Застереження',
-  REPORT_MORE_CAVEATS: 'Ще {count} застережень — у файлі артефакту.',
+  REPORT_MORE_CAVEATS: 'Решта застережень ({count}) — у файлі артефакту.',
   REPORT_LANG_CAVEAT: '{lang}: {text}',
   REPORT_CHART_EXCLUDED: 'Не показано на графіку, лише сирі перегляди: {langs}.',
   REPORT_FOOTER_SOURCE:
@@ -187,9 +259,10 @@ const UK: Record<MessageCode, string> = {
   WEEKLY_AGGREGATION:
     'Тренд підігнано на {weeks} тижневих сумах, а не на {days} денних значеннях: денні перегляди автокорельовані, ' +
     'і підгонка на них дає інтервал вужчий за реальну невизначеність.',
-  ABSOLUTE_VS_RELATIVE:
-    'Показано два тренди: сирі перегляди рухаються на {absolute}%/рік, частка трафіку розділу — на {relative}%/рік. ' +
-    'Відносний і є мірою інтересу до теми; абсолютний несе ще й те, що відбувається з розділом загалом.',
+  ABSOLUTE_VS_RELATIVE: 'Сирі перегляди — {absolute}%/рік, частка трафіку розділу — {relative}%/рік.',
+  TWO_TRENDS_EXPLAINED:
+    'Частка трафіку розділу — це міра інтересу до теми; сирі перегляди несуть ще й те, що відбувається з розділом ' +
+    'загалом.',
   EDITION_TRAFFIC_DECLINING:
     'Сирі перегляди падають на {absolute}%/рік, а частка трафіку розділу тримається на {relative}%/рік. Це означає, ' +
     'що читачів втрачає розділ загалом, а не що згасає інтерес саме до теми.',
@@ -197,14 +270,14 @@ const UK: Record<MessageCode, string> = {
     'За весь період тренд {overall}%/рік, а за останні {weeks} тижнів — {recent}%/рік, і жоден інтервал не містить ' +
     'нуля. Пряма за весь діапазон не описує поточний напрямок.',
   NOTE_TREND_REVERSAL: 'поточний напрямок протилежний трендові періоду',
-  DETAIL_VOLUME: 'медіана {median} переглядів/день проти смуги шум-сигнал {floor}-{ceiling}',
+  DETAIL_VOLUME: 'медіана переглядів на день — {median} при смузі шум-сигнал {floor}-{ceiling}',
   DETAIL_LENGTH: '{days} днів із {target} потрібних для висновку рік-до-року',
   DETAIL_STABILITY: '{agreeing} з {total} підвибірок (половини й третини) зберігають знак нахилу всього ряду',
   DETAIL_STABILITY_SPANS_ZERO:
     'інтервал усього ряду перетинає нуль, тож напрямок не заявляється і згода підвибірок не потрібна',
   DETAIL_STABILITY_TOO_SHORT: 'ряд закороткий, щоб розбити його на підвибірки',
-  DETAIL_OUTLIERS: '{days} із {total} днів прибрано як сплески (бюджет {budget}%)',
-  DETAIL_CONTINUITY: '{missing} відсутніх днів, найдовша прогалина {longest} днів',
+  DETAIL_OUTLIERS: '{days} із {total} днів прибрано як сплески, бюджет {budget}%',
+  DETAIL_CONTINUITY: 'відсутніх днів — {missing}, найдовша прогалина — {longest} дн.',
   ALL_LANGUAGES_DECLINING:
     'Усі порівнювані мови за цей період падають. Ранг 1 означає найповільніше падіння, а не ріст, і рейтинг ' +
     'нічого не каже про те, чи варто взагалі заходити в цю тему.',

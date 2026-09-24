@@ -8,11 +8,15 @@ import {
   headline,
   missingDaysDetail,
   pickTopic,
+  recommendation,
   renderReport,
   selectCaveats,
   signed,
   trendBand,
+  trustLine,
+  weakestComponent,
 } from '../src/lib/report.js';
+import type { ComponentName, ConfidenceComponent } from '../src/lib/confidence.js';
 import type { ReportInput, ReportLanguage, ReportTrend } from '../src/lib/report.js';
 import type { Direction } from '../src/lib/stats.js';
 
@@ -107,9 +111,87 @@ describe('headline', () => {
     const text = render(result, 'uk');
 
     expect(result.code).toBe('HEADLINE_SINGLE');
-    expect(text).toContain('за період — падає');
-    expect(text).toContain('в останні тижні — без ясного напрямку');
+    expect(text).toContain('за період — падає (-7.7%/рік, 95% [-11.7; -3.5])');
+    expect(text).toContain('в останні тижні — без ясного напрямку (+1%/рік)');
     expect(text).not.toContain('зростає');
+  });
+});
+
+function components(scores: Partial<Record<ComponentName, number>>): Record<ComponentName, ConfidenceComponent> {
+  const names: ComponentName[] = ['volume', 'length', 'stability', 'outlierShare', 'continuity'];
+
+  return Object.fromEntries(
+    names.map((name) => [
+      name,
+      {
+        score: scores[name] ?? 1,
+        observed: 0,
+        detail: { code: 'DETAIL_VOLUME', params: { median: 20, floor: 20, ceiling: 500 } },
+      },
+    ]),
+  ) as Record<ComponentName, ConfidenceComponent>;
+}
+
+describe('trust', () => {
+  it('names the weakest part of the confidence vector', () => {
+    expect(weakestComponent(components({ volume: 0.4, stability: 0.8 })).name).toBe('volume');
+    expect(weakestComponent(components({ length: 0.3, volume: 0.9 })).name).toBe('length');
+  });
+
+  it('writes the whole trust sentence in code, numbers included', () => {
+    const line = trustLine(
+      language('uk', trend(-35.6, [-45.1, -27.6], 'down'), {
+        confidence: { overall: 'low', score: 0.62, caveats: [], components: components({ volume: 0 }) },
+      }),
+    );
+
+    expect(render(line as never, 'uk')).toBe(
+      'Довіра (uk): достовірність низька, найслабша складова — обсяг трафіку: медіана переглядів на день — 20 при ' +
+        'смузі шум-сигнал 20-500. Самостійно рішення на цьому ухвалювати не можна.',
+    );
+  });
+
+  it('stays silent when an old artifact has no components', () => {
+    expect(trustLine(language('uk', trend(-1, [-2, 0], 'flat')))).toBeNull();
+  });
+});
+
+describe('recommendation', () => {
+  it('recommends the fastest growing language that is not low confidence', () => {
+    const result = recommendation(
+      input([
+        language('en', trend(30, [20, 40], 'up'), { confidence: { overall: 'low', score: 0.4, caveats: [] } }),
+        language('de', trend(12, [4, 20], 'up')),
+        language('uk', trend(-5, [-9, -1], 'down')),
+      ]),
+    );
+
+    expect(result?.code).toBe('RECOMMEND_LANGUAGE');
+    expect(render(result as never, 'uk')).toContain('de — інтерес зростає (+12%/рік');
+  });
+
+  it('refuses when growth exists only with low confidence', () => {
+    const result = recommendation(
+      input([
+        language('en', trend(30, [20, 40], 'up'), { confidence: { overall: 'low', score: 0.4, caveats: [] } }),
+        language('uk', trend(-5, [-9, -1], 'down')),
+      ]),
+    );
+
+    expect(result?.code).toBe('RECOMMEND_NONE_LOW_CONFIDENCE');
+  });
+
+  it('names the slowest decline as a decline, not a recommendation', () => {
+    const result = recommendation(
+      input([language('en', trend(-16.1, [-18.5, -13.5], 'down')), language('uk', trend(-33.8, [-41.6, -25.8], 'down'))]),
+    );
+
+    expect(result?.code).toBe('RECOMMEND_NONE_ALL_DOWN');
+    expect(render(result as never, 'uk')).toContain('найповільніше падає en (-16.1%/рік), але це спад, а не ріст');
+  });
+
+  it('has nothing to recommend for a single language', () => {
+    expect(recommendation(input([language('uk', trend(5, [1, 9], 'up'))]))).toBeNull();
   });
 });
 

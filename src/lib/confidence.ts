@@ -280,6 +280,7 @@ export function buildCaveats(
             relative: input.trends.relativePercent,
           }),
     );
+    caveats.push(message('TWO_TRENDS_EXPLAINED'));
   }
 
   if (input.outlierDays > 0) {

@@ -14,7 +14,7 @@ const VERSION = '0.1.0';
 const DEFAULT_RETRIES = 4;
 const DEFAULT_BASE_DELAY_MS = 500;
 const DEFAULT_MAX_DELAY_MS = 30_000;
-const DEFAULT_MIN_INTERVAL_MS = 150;
+const DEFAULT_MIN_INTERVAL_MS = 300;
 const DEFAULT_TIMEOUT_MS = 20_000;
 
 export interface RequestOptions {
@@ -25,10 +25,31 @@ export interface RequestOptions {
   timeoutMs?: number;
 }
 
+export const DEFAULT_CONTACT = 'https://github.com/RobertUkr';
+
+export function contact(): { value: string; source: 'env' | 'default' } {
+  const configured = process.env['WIKIMEDIA_CONTACT']?.trim();
+
+  if (configured && configured.length > 0) {
+    return { value: configured, source: 'env' };
+  }
+
+  return { value: DEFAULT_CONTACT, source: 'default' };
+}
+
+export function contactWarning(): string | null {
+  if (contact().source === 'env') {
+    return null;
+  }
+
+  return (
+    `WIKIMEDIA_CONTACT is not set; requests identify themselves with the default contact ${DEFAULT_CONTACT}. ` +
+    'Set it to your own email or URL if you run a fork or a larger volume.'
+  );
+}
+
 export function userAgent(): string {
-  const contact = process.env['WIKIMEDIA_CONTACT']?.trim();
-  const suffix = contact && contact.length > 0 ? contact : 'local CLI; set WIKIMEDIA_CONTACT to a contact address';
-  return `wikipedia-trends/${VERSION} (${suffix}) node/${process.versions.node}`;
+  return `wikipedia-trends/${VERSION} (${contact().value}) node/${process.versions.node}`;
 }
 
 export function normalizeProject(project: string): string {

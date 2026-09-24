@@ -4,14 +4,19 @@ import { runAnalyze } from './commands/analyze.js';
 import { runCompare } from './commands/compare.js';
 import { runFetch } from './commands/fetch.js';
 import { runReport } from './commands/report.js';
+import { DEFAULT_YEARS, runResearch } from './commands/research.js';
 import { runResolve } from './commands/resolve.js';
 import { isLocale } from './lib/messages.js';
+import { contactWarning } from './lib/wikimedia.js';
 import type { Locale } from './lib/messages.js';
 import { SkillError } from './types.js';
 
 const MAX_STDOUT_LINES = 40;
 
 const USAGE = {
+  research:
+    'research --topic "<query>" --lang <query language> --langs uk,pl [--years 2 | --from YYYY-MM-DD --to YYYY-MM-DD] ' +
+    '[--qid Q123] [--locale uk|en]',
   resolve: 'resolve --topic "<query>" --lang <code> [--langs pl,cs]',
   fetch: 'fetch --qid Q123 --langs pl,cs --from YYYY-MM-DD --to YYYY-MM-DD [--no-cache] [--out path.json]',
   analyze: 'analyze --qid Q123 --lang cs --from YYYY-MM-DD --to YYYY-MM-DD [--locale uk] [--no-cache] [--out path.json]',
@@ -99,9 +104,14 @@ function splitLangs(value: string | undefined): string[] {
 
 async function main(): Promise<void> {
   const [command, ...rest] = process.argv.slice(2);
+  const warning = contactWarning();
+
+  if (warning && process.stderr.isTTY) {
+    process.stderr.write(`warning: ${warning}\n`);
+  }
 
   if (!command || command === '--help' || command === '-h') {
-    print({ ok: true, command: 'help', commands: USAGE });
+    print({ ok: true, command: 'help', commands: USAGE, contact: contactWarning() ?? 'WIKIMEDIA_CONTACT is set' });
     return;
   }
 
@@ -213,6 +223,53 @@ async function main(): Promise<void> {
         noCache: values['no-cache'] === true,
         out: values.out ? resolvePath(process.cwd(), values.out) : null,
         locale: parseLocale(values.locale),
+      }),
+    );
+
+    return;
+  }
+
+  if (command === 'research') {
+    const { values } = parseArgs({
+      args: rest,
+      options: {
+        topic: { type: 'string' },
+        qid: { type: 'string' },
+        lang: { type: 'string' },
+        langs: { type: 'string' },
+        from: { type: 'string' },
+        to: { type: 'string' },
+        years: { type: 'string' },
+        locale: { type: 'string' },
+        'no-cache': { type: 'boolean', default: false },
+      },
+    });
+
+    if ((!values.topic && !values.qid) || !values.langs) {
+      throw new SkillError('InvalidInput', `Usage: ${USAGE.research}`);
+    }
+
+    const years = values.years === undefined ? DEFAULT_YEARS : Number.parseInt(values.years, 10);
+
+    if (!Number.isInteger(years) || years < 1 || years > 10) {
+      throw new SkillError('InvalidInput', `--years must be a whole number from 1 to 10, got "${values.years}"`);
+    }
+
+    if ((values.from === undefined) !== (values.to === undefined)) {
+      throw new SkillError('InvalidInput', '--from and --to go together');
+    }
+
+    print(
+      await runResearch({
+        topic: values.topic ?? null,
+        qid: values.qid ?? null,
+        lang: values.lang ?? 'uk',
+        langs: splitLangs(values.langs),
+        from: values.from ?? null,
+        to: values.to ?? null,
+        years,
+        locale: parseLocale(values.locale) ?? 'uk',
+        noCache: values['no-cache'] === true,
       }),
     );
 

@@ -27,7 +27,7 @@ import type { Lang, Message } from '../types.js';
 import { loadSeries, loadTotals } from './fetch.js';
 
 export const MIN_ANALYSIS_DAYS = 30;
-export const ARTIFACT_SCHEMA = 3;
+export const ARTIFACT_SCHEMA = 4;
 export const MIN_RECENT_WEEKS = 4;
 
 export interface TrendReport {

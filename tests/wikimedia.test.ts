@@ -5,6 +5,8 @@ import {
   getProjectTotals,
   normalizeProject,
   projectTotalsUrl,
+  DEFAULT_CONTACT,
+  contactWarning,
   searchArticles,
   stripMarkup,
   userAgent,
@@ -54,11 +56,29 @@ describe('url building', () => {
 });
 
 describe('userAgent', () => {
-  it('carries a contact from the environment', () => {
+  it('carries a contact from the environment and says nothing', () => {
     process.env['WIKIMEDIA_CONTACT'] = 'team@example.com';
-    expect(userAgent()).toContain('team@example.com');
+
+    expect(userAgent()).toContain('(team@example.com)');
+    expect(contactWarning()).toBeNull();
+
     delete process.env['WIKIMEDIA_CONTACT'];
-    expect(userAgent()).toContain('WIKIMEDIA_CONTACT');
+  });
+
+  it('always carries a real contact, and warns when it is only the default', () => {
+    delete process.env['WIKIMEDIA_CONTACT'];
+
+    expect(userAgent()).toContain(`(${DEFAULT_CONTACT})`);
+    expect(DEFAULT_CONTACT).toMatch(/^https:\/\/github\.com\/\w+/);
+    expect(contactWarning()).toContain('WIKIMEDIA_CONTACT is not set');
+  });
+
+  it('ignores a blank value', () => {
+    process.env['WIKIMEDIA_CONTACT'] = '   ';
+
+    expect(userAgent()).toContain(DEFAULT_CONTACT);
+
+    delete process.env['WIKIMEDIA_CONTACT'];
   });
 });
 

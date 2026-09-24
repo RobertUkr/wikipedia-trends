@@ -44,7 +44,7 @@ interface StoredLanguage {
   recentTrend: (ReportTrend & { weeks: number; from: string | null }) | null;
   n_effective: number;
   level: { median: number };
-  confidence: { overall: 'low' | 'medium' | 'high'; score: number; caveats: Message[] };
+  confidence: ReportLanguage['confidence'];
   outliers: { dates: string[] };
   missingDays?: number;
   coverage?: { missingDays: number };

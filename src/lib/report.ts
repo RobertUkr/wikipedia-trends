@@ -7,7 +7,7 @@ import SVGtoPDF from 'svg-to-pdfkit';
 import { packageRoot } from './cache.js';
 import { CHART_HEIGHT, CHART_WIDTH, FONT_FAMILY, lineChart } from './chart.js';
 import type { ChartSeries, TrendBand } from './chart.js';
-import type { ConfidenceLevel } from './confidence.js';
+import type { ComponentName, ConfidenceComponent, ConfidenceLevel } from './confidence.js';
 import { message, render } from './messages.js';
 import type { Locale } from './messages.js';
 import type { Direction } from './stats.js';
@@ -31,6 +31,8 @@ export const LANGUAGE_CAVEAT_PRIORITY: MessageCode[] = [
   'INTERVAL_SPANS_ZERO',
   'RAW_COUNTS_NOT_COMPARABLE',
 ];
+
+export const ONCE_PER_REPORT: MessageCode[] = ['TWO_TRENDS_EXPLAINED', 'WEEKLY_AGGREGATION'];
 
 export interface ReportTrend {
   percentPerYear: number | null;
@@ -56,7 +58,12 @@ export interface ReportLanguage {
   recentTrend: (ReportTrend & { weeks: number; from: string | null }) | null;
   weeks: number;
   medianPerMillion: number;
-  confidence: { overall: ConfidenceLevel; score: number; caveats: Message[] };
+  confidence: {
+    overall: ConfidenceLevel;
+    score: number;
+    caveats: Message[];
+    components?: Record<ComponentName, ConfidenceComponent>;
+  };
   outlierDates: string[];
   missingDays: number;
   points: ReportPoint[];
@@ -121,11 +128,17 @@ export function headline(input: ReportInput): Message {
   if (languages.length === 1) {
     const only = languages[0] as ReportLanguage;
 
+    const primary = only.relativeTrend ?? only.trend;
+
     return message('HEADLINE_SINGLE', {
       topic,
       lang: only.lang,
-      direction: directionMessage(only.trend.direction),
+      direction: directionMessage(primary.direction),
+      percent: signed(primary.percentPerYear),
+      low: signed(primary.ci95?.[0] ?? null),
+      high: signed(primary.ci95?.[1] ?? null),
       recent: directionMessage(only.recentTrend?.direction ?? 'inconclusive'),
+      recentPercent: signed(only.recentTrend?.percentPerYear ?? null),
       confidence: confidenceMessage(only.confidence.overall),
     });
   }
@@ -176,6 +189,90 @@ export function headline(input: ReportInput): Message {
     topic,
     langs: languages.map((item) => item.lang).join(', '),
   });
+}
+
+const COMPONENT_ORDER: ComponentName[] = ['volume', 'stability', 'length', 'outlierShare', 'continuity'];
+
+const COMPONENT_CODES: Record<ComponentName, MessageCode> = {
+  volume: 'COMPONENT_VOLUME',
+  length: 'COMPONENT_LENGTH',
+  stability: 'COMPONENT_STABILITY',
+  outlierShare: 'COMPONENT_OUTLIERS',
+  continuity: 'COMPONENT_CONTINUITY',
+};
+
+const TRUST_CODES: Record<ConfidenceLevel, MessageCode> = {
+  low: 'TRUST_LOW',
+  medium: 'TRUST_MEDIUM',
+  high: 'TRUST_HIGH',
+};
+
+export function weakestComponent(
+  components: Record<ComponentName, ConfidenceComponent>,
+): { name: ComponentName; component: ConfidenceComponent } {
+  let weakest: ComponentName = COMPONENT_ORDER[0] as ComponentName;
+
+  for (const name of COMPONENT_ORDER) {
+    if (components[name].score < components[weakest].score) {
+      weakest = name;
+    }
+  }
+
+  return { name: weakest, component: components[weakest] };
+}
+
+export function trustLine(item: ReportLanguage): Message | null {
+  if (!item.confidence.components) {
+    return null;
+  }
+
+  const { name, component } = weakestComponent(item.confidence.components);
+
+  return message(TRUST_CODES[item.confidence.overall], {
+    lang: item.lang,
+    weakest: message(COMPONENT_CODES[name]),
+    detail: component.detail,
+  });
+}
+
+export function recommendation(input: ReportInput): Message | null {
+  const languages = input.languages;
+
+  if (languages.length < 2) {
+    return null;
+  }
+
+  const byGrowth = (a: ReportLanguage, b: ReportLanguage) =>
+    (b.trend.percentPerYear ?? Number.NEGATIVE_INFINITY) - (a.trend.percentPerYear ?? Number.NEGATIVE_INFINITY);
+  const growing = languages.filter((item) => item.trend.direction === 'up').sort(byGrowth);
+  const trusted = growing.find((item) => item.confidence.overall !== 'low');
+
+  if (trusted) {
+    return message('RECOMMEND_LANGUAGE', {
+      lang: trusted.lang,
+      percent: signed(trusted.trend.percentPerYear),
+      confidence: confidenceMessage(trusted.confidence.overall),
+    });
+  }
+
+  if (growing.length > 0) {
+    return message('RECOMMEND_NONE_LOW_CONFIDENCE', { langs: growing.map((item) => item.lang).join(', ') });
+  }
+
+  if (languages.every((item) => item.trend.direction === 'down')) {
+    const slowest = [...languages].sort(byGrowth)[0] as ReportLanguage;
+
+    return message('RECOMMEND_NONE_ALL_DOWN', { leader: slowest.lang, percent: signed(slowest.trend.percentPerYear) });
+  }
+
+  return message('RECOMMEND_NONE_NO_DIRECTION');
+}
+
+export function verdictLines(input: ReportInput): Message[] {
+  const lines = input.languages.map(trustLine).filter((line): line is Message => line !== null);
+  const advice = recommendation(input);
+
+  return advice ? [...lines, advice] : lines;
 }
 
 function addDays(date: string, days: number): string {
@@ -241,12 +338,14 @@ export function selectCaveats(input: ReportInput): Message[] {
     }
   }
 
-  const weekly = input.languages
-    .flatMap((item) => item.confidence.caveats)
-    .find((caveat) => caveat.code === 'WEEKLY_AGGREGATION');
+  const shared = input.languages.flatMap((item) => item.confidence.caveats);
 
-  if (weekly) {
-    selected.push(weekly);
+  for (const code of ONCE_PER_REPORT) {
+    const caveat = shared.find((item) => item.code === code);
+
+    if (caveat) {
+      selected.push(caveat);
+    }
   }
 
   return selected;
@@ -341,7 +440,14 @@ export async function renderReport(input: ReportInput, locale: Locale, pdfPath: 
   y = doc.y + 8;
 
   doc.font(FONT_BOLD).fontSize(11).fillColor('#111827').text(render(summary, locale), left, y, { width: CONTENT_WIDTH });
-  y = doc.y + 10;
+  y = doc.y + 4;
+
+  for (const line of verdictLines(input)) {
+    doc.font(FONT_REGULAR).fontSize(8.5).fillColor('#1f2937').text(render(line, locale), left, y, { width: CONTENT_WIDTH });
+    y = doc.y + 2;
+  }
+
+  y += 6;
 
   SVGtoPDF(doc, svg, left + (CONTENT_WIDTH - CHART_WIDTH) / 2, y, {
     width: CHART_WIDTH,

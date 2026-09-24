@@ -1,5 +1,6 @@
 import { resolve as resolvePath } from 'node:path';
 import { parseArgs } from 'node:util';
+import type { ParseArgsConfig } from 'node:util';
 import { runAnalyze } from './commands/analyze.js';
 import { runCompare } from './commands/compare.js';
 import { runFetch } from './commands/fetch.js';
@@ -16,13 +17,14 @@ const MAX_STDOUT_LINES = 40;
 
 const USAGE = {
   research:
-    'research --topic "<query>" --lang <query language> --langs uk,pl [--years 2 | --from YYYY-MM-DD --to YYYY-MM-DD] ' +
-    '[--qid Q123] [--locale uk|en]',
+    'research (--topic "<query>" | --qid Q123) --langs uk,pl [--lang uk] [--years 1-10 | --from YYYY-MM-DD --to YYYY-MM-DD] ' +
+    '[--locale uk|en] [--no-cache]',
   resolve: 'resolve --topic "<query>" --lang <code> [--langs pl,cs]',
   fetch: 'fetch --qid Q123 --langs pl,cs --from YYYY-MM-DD --to YYYY-MM-DD [--no-cache] [--out path.json]',
   analyze: 'analyze --qid Q123 --lang cs --from YYYY-MM-DD --to YYYY-MM-DD [--locale uk] [--no-cache] [--out path.json]',
   compare: 'compare --qid Q123 --langs cs,uk --from YYYY-MM-DD --to YYYY-MM-DD [--locale uk] [--no-cache] [--out path.json]',
-  report: 'report --qid Q123 --langs en,de,uk --from YYYY-MM-DD --to YYYY-MM-DD [--locale uk|en] [--artifact path.json]',
+  report:
+    'report --qid Q123 --langs en,de,uk --from YYYY-MM-DD --to YYYY-MM-DD [--locale uk|en] [--artifact path.json] [--no-cache]',
 };
 
 // Pretty-prints down to the cutoff depth and keeps anything deeper on one line.
@@ -99,6 +101,20 @@ function parseLocale(value: string | undefined): Locale | null {
   return value;
 }
 
+// parseArgs throws a plain TypeError on an unknown flag; the agent should see it as bad input with the usage line.
+function parse<T extends NonNullable<ParseArgsConfig['options']>>(command: keyof typeof USAGE, args: string[], options: T) {
+  try {
+    return parseArgs<{ args: string[]; options: T }>({ args, options }).values;
+  } catch (error) {
+    throw new SkillError('InvalidInput', `${error instanceof Error ? error.message : String(error)}. Usage: ${USAGE[command]}`);
+  }
+}
+
+/** Resolves a user-given path against the working directory; null when the flag is absent. */
+function toPath(value: string | undefined): string | null {
+  return value ? resolvePath(process.cwd(), value) : null;
+}
+
 function splitLangs(value: string | undefined): string[] {
   return (value ?? '')
     .split(',')
@@ -115,18 +131,15 @@ async function main(): Promise<void> {
   }
 
   if (!command || command === '--help' || command === '-h') {
-    print({ ok: true, command: 'help', commands: USAGE, contact: contactWarning() ?? 'WIKIMEDIA_CONTACT is set' });
+    print({ ok: true, command: 'help', commands: USAGE, contact: warning ?? 'WIKIMEDIA_CONTACT is set' });
     return;
   }
 
   if (command === 'resolve') {
-    const { values } = parseArgs({
-      args: rest,
-      options: {
-        topic: { type: 'string' },
-        lang: { type: 'string' },
-        langs: { type: 'string' },
-      },
+    const values = parse(command, rest, {
+      topic: { type: 'string' },
+      lang: { type: 'string' },
+      langs: { type: 'string' },
     });
 
     if (!values.topic || !values.lang) {
@@ -138,16 +151,13 @@ async function main(): Promise<void> {
   }
 
   if (command === 'fetch') {
-    const { values } = parseArgs({
-      args: rest,
-      options: {
-        qid: { type: 'string' },
-        langs: { type: 'string' },
-        from: { type: 'string' },
-        to: { type: 'string' },
-        out: { type: 'string' },
-        'no-cache': { type: 'boolean', default: false },
-      },
+    const values = parse(command, rest, {
+      qid: { type: 'string' },
+      langs: { type: 'string' },
+      from: { type: 'string' },
+      to: { type: 'string' },
+      out: { type: 'string' },
+      'no-cache': { type: 'boolean', default: false },
     });
 
     if (!values.qid || !values.langs || !values.from || !values.to) {
@@ -161,24 +171,21 @@ async function main(): Promise<void> {
         from: values.from,
         to: values.to,
         noCache: values['no-cache'] === true,
-        out: values.out ? resolvePath(process.cwd(), values.out) : null,
+        out: toPath(values.out),
       }),
     );
     return;
   }
 
   if (command === 'analyze') {
-    const { values } = parseArgs({
-      args: rest,
-      options: {
-        qid: { type: 'string' },
-        lang: { type: 'string' },
-        from: { type: 'string' },
-        to: { type: 'string' },
-        out: { type: 'string' },
-        locale: { type: 'string' },
-        'no-cache': { type: 'boolean', default: false },
-      },
+    const values = parse(command, rest, {
+      qid: { type: 'string' },
+      lang: { type: 'string' },
+      from: { type: 'string' },
+      to: { type: 'string' },
+      out: { type: 'string' },
+      locale: { type: 'string' },
+      'no-cache': { type: 'boolean', default: false },
     });
 
     if (!values.qid || !values.lang || !values.from || !values.to) {
@@ -192,7 +199,7 @@ async function main(): Promise<void> {
         from: values.from,
         to: values.to,
         noCache: values['no-cache'] === true,
-        out: values.out ? resolvePath(process.cwd(), values.out) : null,
+        out: toPath(values.out),
         locale: parseLocale(values.locale),
       }),
     );
@@ -201,17 +208,14 @@ async function main(): Promise<void> {
   }
 
   if (command === 'compare') {
-    const { values } = parseArgs({
-      args: rest,
-      options: {
-        qid: { type: 'string' },
-        langs: { type: 'string' },
-        from: { type: 'string' },
-        to: { type: 'string' },
-        out: { type: 'string' },
-        locale: { type: 'string' },
-        'no-cache': { type: 'boolean', default: false },
-      },
+    const values = parse(command, rest, {
+      qid: { type: 'string' },
+      langs: { type: 'string' },
+      from: { type: 'string' },
+      to: { type: 'string' },
+      out: { type: 'string' },
+      locale: { type: 'string' },
+      'no-cache': { type: 'boolean', default: false },
     });
 
     if (!values.qid || !values.langs || !values.from || !values.to) {
@@ -225,7 +229,7 @@ async function main(): Promise<void> {
         from: values.from,
         to: values.to,
         noCache: values['no-cache'] === true,
-        out: values.out ? resolvePath(process.cwd(), values.out) : null,
+        out: toPath(values.out),
         locale: parseLocale(values.locale),
       }),
     );
@@ -234,26 +238,24 @@ async function main(): Promise<void> {
   }
 
   if (command === 'research') {
-    const { values } = parseArgs({
-      args: rest,
-      options: {
-        topic: { type: 'string' },
-        qid: { type: 'string' },
-        lang: { type: 'string' },
-        langs: { type: 'string' },
-        from: { type: 'string' },
-        to: { type: 'string' },
-        years: { type: 'string' },
-        locale: { type: 'string' },
-        'no-cache': { type: 'boolean', default: false },
-      },
+    const values = parse(command, rest, {
+      topic: { type: 'string' },
+      qid: { type: 'string' },
+      lang: { type: 'string' },
+      langs: { type: 'string' },
+      from: { type: 'string' },
+      to: { type: 'string' },
+      years: { type: 'string' },
+      locale: { type: 'string' },
+      'no-cache': { type: 'boolean', default: false },
     });
 
     if ((!values.topic && !values.qid) || !values.langs) {
       throw new SkillError('InvalidInput', `Usage: ${USAGE.research}`);
     }
 
-    const years = values.years === undefined ? DEFAULT_YEARS : Number.parseInt(values.years, 10);
+    // Number() rejects "2abc" and keeps "1.5" fractional, so both fail the integer check below.
+    const years = values.years === undefined ? DEFAULT_YEARS : Number(values.years);
 
     if (!Number.isInteger(years) || years < 1 || years > 10) {
       throw new SkillError('InvalidInput', `--years must be a whole number from 1 to 10, got "${values.years}"`);
@@ -281,17 +283,14 @@ async function main(): Promise<void> {
   }
 
   if (command === 'report') {
-    const { values } = parseArgs({
-      args: rest,
-      options: {
-        qid: { type: 'string' },
-        langs: { type: 'string' },
-        from: { type: 'string' },
-        to: { type: 'string' },
-        locale: { type: 'string' },
-        artifact: { type: 'string' },
-        'no-cache': { type: 'boolean', default: false },
-      },
+    const values = parse(command, rest, {
+      qid: { type: 'string' },
+      langs: { type: 'string' },
+      from: { type: 'string' },
+      to: { type: 'string' },
+      locale: { type: 'string' },
+      artifact: { type: 'string' },
+      'no-cache': { type: 'boolean', default: false },
     });
 
     if (!values.qid || !values.langs || !values.from || !values.to) {
@@ -305,7 +304,7 @@ async function main(): Promise<void> {
         from: values.from,
         to: values.to,
         locale: parseLocale(values.locale) ?? 'uk',
-        artifact: values.artifact ? resolvePath(process.cwd(), values.artifact) : null,
+        artifact: toPath(values.artifact),
         noCache: values['no-cache'] === true,
       }),
     );

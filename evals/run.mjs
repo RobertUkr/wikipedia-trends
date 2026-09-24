@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process';
 import { mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -13,47 +15,75 @@ if (!scenario) {
   process.exit(2);
 }
 
-const workspace = join(root, 'output', 'evals', 'workspace');
+const workspace = join(realpathSync(tmpdir()), `wikipedia-trends-eval-${process.pid}`);
 const results = join(root, 'output', 'evals', 'results');
 await rm(workspace, { recursive: true, force: true });
 await mkdir(join(workspace, '.claude', 'skills'), { recursive: true });
 await symlink(root, join(workspace, '.claude', 'skills', 'wikipedia-trends'));
 await mkdir(results, { recursive: true });
 
-const args = [
-  '-p',
-  scenario.prompt,
-  '--model',
-  model,
-  '--output-format',
-  'stream-json',
-  '--verbose',
-  '--max-budget-usd',
-  budget,
-  '--allowedTools',
-  'Skill',
-  'Read',
-  'Bash(node:*)',
-  `Bash(${root}/scripts/setup.sh)`,
-];
+const tools = ['Skill', 'Read', 'Bash(node:*)', `Bash(${root}/scripts/setup.sh)`];
+const local = !model.startsWith('claude-');
 
-const events = [];
-const child = spawn('claude', args, { cwd: workspace, stdio: ['ignore', 'pipe', 'inherit'] });
-let buffer = '';
-
-child.stdout.on('data', (chunk) => {
-  buffer += chunk;
-  const lines = buffer.split('\n');
-  buffer = lines.pop() ?? '';
-
-  for (const line of lines) {
-    if (line.trim()) {
-      events.push(JSON.parse(line));
-    }
+// Returns null for anything that is not a JSON value, e.g. a warning line on stdout.
+function parseJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
   }
-});
+}
 
-await new Promise((done) => child.on('close', done));
+function ask(prompt, resume) {
+  const args = ['-p', prompt, '--model', model, '--output-format', 'stream-json', '--verbose', '--max-budget-usd', budget];
+  const turn = [];
+
+  if (resume) {
+    args.push('--resume', resume);
+  }
+
+  if (local) {
+    args.push('--tools', 'Skill', 'Read', 'Bash');
+  }
+
+  args.push('--strict-mcp-config', '--permission-mode', 'default', '--allowedTools', ...tools);
+  const child = spawn('claude', args, { cwd: workspace, env: { ...process.env, WIKIPEDIA_TRENDS_OPEN: '0' }, stdio: ['ignore', 'pipe', 'inherit'] });
+  let buffer = '';
+
+  child.stdout.on('data', (chunk) => {
+    buffer += chunk;
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+
+    for (const line of lines) {
+      const event = parseJson(line);
+
+      if (event) {
+        turn.push(event);
+      }
+    }
+  });
+
+  return new Promise((done) => {
+    child.on('error', (error) => {
+      console.error(`claude failed to start: ${error.message}`);
+      done(turn);
+    });
+    child.on('close', () => done(turn));
+  });
+}
+
+const events = await ask(scenario.prompt);
+const turns = [events.find((event) => event.type === 'result') ?? {}];
+
+// Without a session id the follow-up would silently start a fresh conversation.
+if (scenario.followUp && !turns[0].session_id) {
+  console.error('first turn produced no session_id; follow-up skipped');
+} else if (scenario.followUp) {
+  const followUp = await ask(scenario.followUp, turns[0].session_id);
+  events.push(...followUp);
+  turns.push(followUp.find((event) => event.type === 'result') ?? {});
+}
 
 const toolCalls = [];
 const toolOutputs = [];
@@ -78,22 +108,25 @@ for (const event of events) {
   }
 }
 
-const final = events.find((event) => event.type === 'result') ?? {};
+const final = turns.at(-1) ?? {};
 const answer = final.result ?? '';
 const clean = (text) => text.replace(/[*`]/g, '').replace(/\s+/g, ' ');
 const plain = clean(answer);
-const withoutLang = (text) => clean(text).replace(/^[a-z]{2,3}: /, '');
-const evidence = [...toolOutputs, scenario.prompt].join('\n');
+const parsedOutputs = toolOutputs.map(parseJson);
+const cliOutputs = toolOutputs.filter((_, index) => typeof parsedOutputs[index]?.command === 'string');
+const evidence = [...cliOutputs, scenario.prompt, scenario.followUp ?? ''].join('\n');
 
 const NUMBER = /[-+−]?\d+(?:[.,]\d+)?/g;
 const normalise = (value) => String(Number(value.replace('−', '-').replace('+', '').replace(',', '.')));
 const known = new Set((evidence.match(NUMBER) ?? []).map(normalise));
-const knownAbsolute = new Set([...known].map((value) => String(Math.abs(Number(value)))));
+const absolute = (value) => String(Math.abs(Number(value)));
+const knownAbsolute = new Set([...known].map(absolute));
+const kind = (value) => (known.has(value) ? 'exact' : knownAbsolute.has(absolute(value)) ? 'signDropped' : 'unknown');
 
 const numbers = (answer.match(NUMBER) ?? []).map((raw) => ({ raw, value: normalise(raw) }));
-const exact = numbers.filter((item) => known.has(item.value));
-const signDropped = numbers.filter((item) => !known.has(item.value) && knownAbsolute.has(String(Math.abs(Number(item.value)))));
-const unknown = numbers.filter((item) => !known.has(item.value) && !knownAbsolute.has(String(Math.abs(Number(item.value)))));
+const exact = numbers.filter((item) => kind(item.value) === 'exact');
+const signDropped = numbers.filter((item) => kind(item.value) === 'signDropped');
+const unknown = numbers.filter((item) => kind(item.value) === 'unknown');
 
 function ownText(answerText, summaryText) {
   const lines = (text) =>
@@ -111,46 +144,36 @@ function ownText(answerText, summaryText) {
   return {
     ownLines: own.length,
     droppedLines: dropped.length,
-    numbersInOwnText: (joined.match(/[-+−]?\d+(?:[.,]\d+)?/g) ?? []).length,
+    numbersInOwnText: (joined.match(NUMBER) ?? []).length,
     latinWordsInOwnText: [...new Set(words.match(/\b[A-Za-z]{3,}\b/g) ?? [])],
     own,
     dropped,
   };
 }
 
-const research = toolOutputs
-  .map((text) => {
-    try {
-      return JSON.parse(text);
-    } catch {
-      return null;
-    }
-  })
-  .find((value) => value?.command === 'research' && value?.status === 'done');
+// A failed research run has no summary to compare against.
+const research = parsedOutputs.filter((value) => value?.command === 'research' && value.ok !== false).at(-1);
 
 const summary = {
   scenario: scenario.id,
   model,
-  turns: final.num_turns ?? null,
-  costUsd: final.total_cost_usd ?? null,
-  durationMs: final.duration_ms ?? null,
-  usage: final.usage ?? null,
+  turns: turns.map((turn) => turn.num_turns ?? null),
+  costUsd: Math.round(turns.reduce((sum, turn) => sum + (turn.total_cost_usd ?? 0), 0) * 10000) / 10000,
+  durationMs: turns.reduce((sum, turn) => sum + (turn.duration_ms ?? 0), 0),
+  usage: turns.map((turn) => turn.usage ?? null),
   toolCalls: toolCalls.length,
   toolsByName: toolCalls.reduce((acc, call) => ({ ...acc, [call.tool]: (acc[call.tool] ?? 0) + 1 }), {}),
   commands: toolCalls.filter((call) => call.tool === 'Bash').map((call) => call.input.command),
   numbers: { total: numbers.length, exact: exact.length, signDropped: signDropped.map((item) => item.raw), unknown: unknown.map((item) => item.raw) },
   expected: research
     ? {
-        headline: research.headline,
-        languages: research.languages.map((item) => ({ lang: item.lang, direction: item.direction, recent: item.recentDirection, confidence: item.confidence })),
-        caveats: research.caveats.length,
+        status: research.status,
+        headline: research.headline ?? null,
+        languages: (research.languages ?? []).map((item) => ({ lang: item.lang, direction: item.direction, recent: item.recentDirection, confidence: item.confidence })),
+        caveats: (research.caveats ?? []).length,
         summaryVerbatim: plain.includes(clean(research.summary)),
         ownText: ownText(answer, research.summary),
-        headlineVerbatim: plain.includes(clean(research.headline)),
-        languageLinesVerbatim: `${research.languages.filter((item) => plain.includes(withoutLang(item.text))).length}/${research.languages.length}`,
-        caveatsVerbatim: `${research.caveats.filter((item) => plain.includes(withoutLang(item))).length}/${research.caveats.length}`,
-        confidenceWordsMissing: research.languages.map((item) => item.text.split('— ').pop()).filter((word) => !plain.includes(word)),
-        reportPathGiven: plain.includes(research.report),
+        reportPathGiven: research.report ? plain.includes(research.report) : null,
         failedToolCalls: toolFailures,
       }
     : null,

@@ -4,7 +4,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 fail() {
-  printf '{"ok":false,"command":"setup","error":{"code":"%s","message":"%s"}}\n' "$1" "$2"
+  local message="${2//\\/\\\\}"
+  printf '{"ok":false,"command":"setup","error":{"code":"%s","message":"%s"}}\n' "$1" "${message//\"/\\\"}"
   exit 1
 }
 
@@ -13,6 +14,8 @@ command -v npm >/dev/null 2>&1 || fail "NpmMissing" "npm is required"
 
 node_major="$(node -p 'process.versions.node.split(".")[0]')"
 [ "$node_major" -ge 20 ] || fail "NodeTooOld" "Node.js 20 or newer is required, found $(node -v)"
+
+[ -f package-lock.json ] || fail "LockMissing" "package-lock.json not found"
 
 lock_hash="$(node -e 'const c=require("crypto"),f=require("fs");process.stdout.write(c.createHash("sha256").update(f.readFileSync("package-lock.json")).digest("hex"))')"
 stamp="node_modules/.setup-stamp"
@@ -30,8 +33,8 @@ node dist/cli.js --help >/dev/null || fail "SmokeFailed" "dist/cli.js does not s
 if [ -n "${WIKIMEDIA_CONTACT:-}" ]; then
   contact="set"
 else
-  contact="default"
-  echo "warning: WIKIMEDIA_CONTACT is not set; the default contact https://github.com/RobertUkr is used. Set your own email or URL in a fork." 1>&2
+  contact="none"
+  echo "warning: WIKIMEDIA_CONTACT is not set; requests carry no contact and go out one every 6 s. Set it to your email or URL." 1>&2
 fi
 
 printf '{"ok":true,"command":"setup","node":"%s","dependencies":"%s","contact":"%s","cli":"%s"}\n' \

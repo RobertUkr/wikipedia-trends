@@ -6,6 +6,7 @@ import { render } from '../src/lib/messages.js';
 import {
   chartSeries,
   confidenceCell,
+  decisionLines,
   explorationOrder,
   headline,
   missingDaysDetail,
@@ -127,7 +128,7 @@ function components(scores: Partial<Record<ComponentName, number>>): Record<Comp
   const names: ComponentName[] = ['volume', 'length', 'stability', 'outlierShare', 'continuity'];
 
   return Object.fromEntries(
-    names.map((name) => [
+    names.map((name): [ComponentName, ConfidenceComponent] => [
       name,
       {
         score: scores[name] ?? 1,
@@ -199,6 +200,16 @@ describe('recommendation', () => {
   it('has nothing to recommend for a single language', () => {
     expect(recommendation(input([language('uk', trend(5, [1, 9], 'up'))]))).toBeNull();
   });
+
+  it('names the same slowest decline as the headline when one percent is missing', () => {
+    const report = input([
+      language('aa', { ...trend(0, [0, 0], 'down'), percentPerYear: null, ci95: null }),
+      language('bb', trend(-5, [-9, -1], 'down')),
+    ]);
+
+    expect(headline(report).params).toMatchObject({ leader: 'bb' });
+    expect(recommendation(report)?.params).toMatchObject({ leader: 'bb' });
+  });
 });
 
 describe('reportFileName', () => {
@@ -227,6 +238,24 @@ describe('explorationOrder', () => {
 
   it('says nothing for a single language', () => {
     expect(explorationOrder(input([language('uk', trend(5, [1, 9], 'up'))]))).toBeNull();
+  });
+});
+
+describe('decisionLines', () => {
+  it('holds the recommendation and the order without the trust lines', () => {
+    const report = input([
+      language('en', trend(12, [4, 20], 'up'), {
+        confidence: { overall: 'medium', score: 0.8, caveats: [], components: components({ volume: 0.4 }) },
+      }),
+      language('de', trend(-5, [-9, -1], 'down')),
+    ]);
+
+    expect(decisionLines(report).map((line) => line.code)).toEqual(['RECOMMEND_LANGUAGE', 'RECOMMEND_ORDER']);
+    expect(verdictLines(report).map((line) => line.code)).toEqual(['TRUST_MEDIUM', 'RECOMMEND_LANGUAGE', 'RECOMMEND_ORDER']);
+  });
+
+  it('is empty for a single language', () => {
+    expect(decisionLines(input([language('uk', trend(5, [1, 9], 'up'))]))).toEqual([]);
   });
 });
 

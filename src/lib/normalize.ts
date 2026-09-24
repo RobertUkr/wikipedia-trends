@@ -1,7 +1,8 @@
 import { SkillError } from '../types.js';
 import type { DailyPoint } from '../types.js';
-
-const DAY_MS = 24 * 60 * 60 * 1000;
+import { DAY_MS, formatDay, parseDay } from './dates.js';
+import { round } from './math.js';
+import { mean } from './stats.js';
 
 /** Moving-average window in days; the smoothed series is for charts only, never for fitting. */
 export const SMOOTHING_WINDOW = 7;
@@ -48,7 +49,6 @@ export interface NormalizedSeries {
   unit: Unit;
   dates: string[];
   values: number[];
-  smoothed: number[];
   points: NormalizedPoint[];
   rawValues: number[];
   missingDays: number;
@@ -56,14 +56,13 @@ export interface NormalizedSeries {
   leadingGapDays: number;
   trailingGapDays: number;
   zeroDays: number;
-  filledDays: number;
   totalsCoverage: number;
 }
 
 /** Every UTC calendar date from `from` to `to` inclusive, as YYYY-MM-DD. */
 export function enumerateDates(from: string, to: string): string[] {
-  const start = Date.parse(`${from}T00:00:00Z`);
-  const end = Date.parse(`${to}T00:00:00Z`);
+  const start = parseDay(from);
+  const end = parseDay(to);
 
   if (!Number.isFinite(start) || !Number.isFinite(end)) {
     throw new SkillError('InvalidInput', `Cannot enumerate dates between "${from}" and "${to}"`, { from, to });
@@ -72,7 +71,7 @@ export function enumerateDates(from: string, to: string): string[] {
   const dates: string[] = [];
 
   for (let cursor = start; cursor <= end; cursor += DAY_MS) {
-    dates.push(new Date(cursor).toISOString().slice(0, 10));
+    dates.push(formatDay(cursor));
   }
 
   return dates;
@@ -88,13 +87,19 @@ export function interpolate(values: Array<number | null>): { values: number[]; f
     return { values: values.map(() => 0), filled };
   }
 
+  // One forward pass: `before` is the last known index seen, `known[next]` the first known index ahead.
+  let before: number | undefined;
+  let next = 0;
+
   const result = values.map((value, index) => {
     if (value !== null) {
+      before = index;
+      next += 1;
+
       return value;
     }
 
-    const before = [...known].reverse().find((candidate) => candidate < index);
-    const after = known.find((candidate) => candidate > index);
+    const after = known[next];
 
     if (before === undefined) {
       return values[after as number] as number;
@@ -137,11 +142,13 @@ export function alignToRange(
   const dates = enumerateDates(from, to);
   const known = new Map(points.map((point) => [point.date, point.views]));
   const filled = dates.map((date) => !known.has(date));
-  const leadingGapDays = filled.indexOf(false) === -1 ? dates.length : filled.indexOf(false);
-  const trailingGapDays = filled.lastIndexOf(false) === -1 ? 0 : dates.length - 1 - filled.lastIndexOf(false);
+  const firstKnown = filled.indexOf(false);
+  const lastKnown = filled.lastIndexOf(false);
+  const leadingGapDays = firstKnown === -1 ? dates.length : firstKnown;
+  const trailingGapDays = lastKnown === -1 ? 0 : dates.length - 1 - lastKnown;
   const inside = (index: number) => index >= leadingGapDays && index < dates.length - trailingGapDays;
   // Inside days for a title the API has no data for are missing, not zero.
-  const lost = dates.map((date, index) => inside(index) && !known.has(date) && unknown.has(date));
+  const lost = dates.map((date, index) => inside(index) && filled[index] === true && unknown.has(date));
   // Other inside days the API omits had no views. Edge gaps stay null and take the nearest known value,
   // so a late-created article does not look like growth from nothing.
   const values = interpolate(
@@ -176,9 +183,8 @@ export function movingAverage(values: number[], window: number = SMOOTHING_WINDO
   return values.map((_, index) => {
     const start = Math.max(0, index - half);
     const end = Math.min(values.length, index + half + 1);
-    const slice = values.slice(start, end);
 
-    return slice.reduce((sum, value) => sum + value, 0) / slice.length;
+    return mean(values.slice(start, end));
   });
 }
 
@@ -234,7 +240,7 @@ export function toShare(series: DailyPoint[], projectTotals: DailyPoint[]): Shar
       date: point.date,
       raw: point.views,
       total,
-      perMillion: perMillion === null ? null : Math.round(perMillion * 1000) / 1000,
+      perMillion: perMillion === null ? null : round(perMillion, 3),
     };
   });
 }
@@ -270,7 +276,7 @@ export function normalizeSeries(
     raw: aligned.values[index] as number,
     perMillion: shares[index]?.perMillion ?? null,
     value: values[index] as number,
-    smoothed: Math.round((smoothed[index] as number) * 1000) / 1000,
+    smoothed: round(smoothed[index] as number, 3),
     filled: aligned.filled[index] === true,
   }));
 
@@ -278,7 +284,6 @@ export function normalizeSeries(
     unit,
     dates: aligned.dates,
     values,
-    smoothed,
     points: pointsOut,
     rawValues: aligned.values,
     missingDays: aligned.missingDays,
@@ -286,7 +291,6 @@ export function normalizeSeries(
     leadingGapDays: aligned.leadingGapDays,
     trailingGapDays: aligned.trailingGapDays,
     zeroDays: aligned.zeroDays,
-    filledDays: aligned.missingDays,
-    totalsCoverage: Math.round(totalsCoverage * 1000) / 1000,
+    totalsCoverage: round(totalsCoverage, 3),
   };
 }

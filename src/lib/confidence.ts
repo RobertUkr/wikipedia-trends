@@ -1,5 +1,6 @@
+import { clamp01, round } from './math.js';
 import { message } from './messages.js';
-import { theilSen, toPoints, trendDirection } from './stats.js';
+import { spansZero, theilSen, toPoints, trendDirection } from './stats.js';
 import type { Message } from '../types.js';
 
 /** Median raw views/day at or below which the volume score is 0. */
@@ -16,6 +17,14 @@ export const OUTLIER_BUDGET = 0.1;
 export const GAP_SUSPICIOUS_DAYS = 14;
 /** Volume score below which LOW_VOLUME is raised and 'high' is ruled out (≈60 views/day). */
 export const LOW_VOLUME_CAVEAT_AT = 0.35;
+/** Length score below which 'high' is ruled out (≈255 days). */
+export const SHORT_LENGTH_CAP_AT = 0.35;
+/** Volume score below which the level is forced to 'low': under ≈38 views/day the counts are mostly noise. */
+export const NOISE_VOLUME_AT = 0.2;
+/** Highest continuity score allowed once a gap reaches GAP_SUSPICIOUS_DAYS. */
+export const GAP_CONTINUITY_CAP = 0.4;
+/** Weight of the missing-day share in continuity: about a third of the range missing drives it to 0. */
+export const MISSING_DAY_WEIGHT = 3;
 
 /** Weights of the five confidence components in the overall score; they sum to 1. */
 export const WEIGHTS = {
@@ -83,16 +92,6 @@ export interface ConfidenceReport {
   caveats: Message[];
 }
 
-function clamp01(value: number): number {
-  return Math.max(0, Math.min(1, value));
-}
-
-function round(value: number, digits = 2): number {
-  const factor = 10 ** digits;
-
-  return Math.round(value * factor) / factor;
-}
-
 function sign(value: number): number {
   if (value > 0) {
     return 1;
@@ -156,7 +155,6 @@ function lengthComponent(rangeDays: number): ConfidenceComponent {
 }
 
 function stabilityComponent(values: number[], ci95: [number, number], fullSlope: number): ConfidenceComponent {
-  const spansZero = ci95[0] <= 0 && ci95[1] >= 0;
   const slopes = subsampleSlopes(values);
 
   if (slopes.length === 0) {
@@ -167,7 +165,7 @@ function stabilityComponent(values: number[], ci95: [number, number], fullSlope:
   const agreement = agreeing / slopes.length;
 
   // With an interval spanning zero the sign is not claimed, so its instability is not penalised here.
-  if (spansZero) {
+  if (spansZero(ci95)) {
     return {
       score: 1,
       observed: round(agreement),
@@ -194,9 +192,8 @@ function outlierComponent(outlierDays: number, rangeDays: number): ConfidenceCom
 
 function continuityComponent(missingDays: number, longestGapDays: number, rangeDays: number): ConfidenceComponent {
   const share = rangeDays === 0 ? 0 : missingDays / rangeDays;
-  // Missing days weigh triple: about a third of the range missing drives continuity to 0.
-  const base = clamp01(1 - share * 3);
-  const score = longestGapDays >= GAP_SUSPICIOUS_DAYS ? Math.min(base, 0.4) : base;
+  const base = clamp01(1 - share * MISSING_DAY_WEIGHT);
+  const score = longestGapDays >= GAP_SUSPICIOUS_DAYS ? Math.min(base, GAP_CONTINUITY_CAP) : base;
 
   return {
     score: round(score),
@@ -229,20 +226,18 @@ export function assessConfidence(input: ConfidenceInput): ConfidenceReport {
   let overall = levelFromScore(score);
 
   // The caps below keep the level consistent with the caveats raised.
-  if (components.length.score < 0.35 && overall === 'high') {
+  const capsAtMedium =
+    components.length.score < SHORT_LENGTH_CAP_AT ||
+    components.volume.score < LOW_VOLUME_CAVEAT_AT ||
+    codes.has('SLOPE_SIGN_UNSTABLE') ||
+    codes.has('TREND_REVERSAL');
+
+  if (capsAtMedium && overall === 'high') {
     overall = 'medium';
   }
 
-  if (components.volume.score < LOW_VOLUME_CAVEAT_AT && overall === 'high') {
-    overall = 'medium';
-  }
-
-  if ((codes.has('SLOPE_SIGN_UNSTABLE') || codes.has('TREND_REVERSAL')) && overall === 'high') {
-    overall = 'medium';
-  }
-
-  // Under ≈38 views/day the counts are mostly noise, whatever the other components say.
-  if (components.volume.score < 0.2) {
+  // Noise-level volume overrides whatever the other components say.
+  if (components.volume.score < NOISE_VOLUME_AT) {
     overall = 'low';
   }
 
@@ -255,7 +250,8 @@ export function buildCaveats(
   components: Record<ComponentName, ConfidenceComponent>,
 ): Message[] {
   const caveats: Message[] = [];
-  const spansZero = input.ci95[0] <= 0 && input.ci95[1] >= 0;
+  const includesZero = spansZero(input.ci95);
+  const { formerTitles = [], zeroDays = 0 } = input;
 
   if (components.volume.score < LOW_VOLUME_CAVEAT_AT) {
     caveats.push(
@@ -275,9 +271,9 @@ export function buildCaveats(
 
   // The relative trend is the measure of interest; fall back to the absolute one when shares are unavailable.
   const primaryCi = input.trends ? (input.trends.relativeCi ?? input.trends.absoluteCi) : null;
-  const inconclusive = primaryCi ? trendDirection(primaryCi) === 'inconclusive' : spansZero;
+  const inconclusive = primaryCi ? trendDirection(primaryCi) === 'inconclusive' : includesZero;
 
-  if (spansZero) {
+  if (includesZero) {
     // A 'flat' interval also spans zero but is a conclusion, so it gets no caveat.
     if (inconclusive) {
       caveats.push(message('INTERVAL_SPANS_ZERO'));
@@ -309,17 +305,10 @@ export function buildCaveats(
     // Raw views falling while the share holds means the edition shrinks, not interest in the topic.
     const absoluteFalling = absoluteDirection === 'down';
     const relativeHolding = relativeDirection === 'flat';
+    const code = absoluteFalling && relativeHolding ? 'EDITION_TRAFFIC_DECLINING' : 'ABSOLUTE_VS_RELATIVE';
 
     caveats.push(
-      absoluteFalling && relativeHolding
-        ? message('EDITION_TRAFFIC_DECLINING', {
-            absolute: input.trends.absolutePercent,
-            relative: input.trends.relativePercent,
-          })
-        : message('ABSOLUTE_VS_RELATIVE', {
-            absolute: input.trends.absolutePercent,
-            relative: input.trends.relativePercent,
-          }),
+      message(code, { absolute: input.trends.absolutePercent, relative: input.trends.relativePercent }),
     );
     caveats.push(message('TWO_TRENDS_EXPLAINED'));
   }
@@ -332,12 +321,12 @@ export function buildCaveats(
     caveats.push(message('LONG_GAP_POSSIBLE_RENAME', { days: input.longestGapDays }));
   }
 
-  if ((input.formerTitles ?? []).length > 1) {
-    caveats.push(message('TITLE_HISTORY_MERGED', { titles: (input.formerTitles ?? []).join(' → ') }));
+  if (formerTitles.length > 1) {
+    caveats.push(message('TITLE_HISTORY_MERGED', { titles: formerTitles.join(' → ') }));
   }
 
-  if ((input.zeroDays ?? 0) > 0) {
-    caveats.push(message('ZERO_VIEW_DAYS', { days: input.zeroDays ?? 0 }));
+  if (zeroDays > 0) {
+    caveats.push(message('ZERO_VIEW_DAYS', { days: zeroDays }));
   }
 
   if (!input.normalized) {

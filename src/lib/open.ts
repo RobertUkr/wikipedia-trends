@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 
-/** Command and arguments that open a file in the system viewer. */
-export interface Opener {
+// Command and arguments that open a file in the system viewer.
+interface Opener {
   command: string;
   args: string[];
 }

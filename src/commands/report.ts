@@ -6,6 +6,7 @@ import type { Locale } from '../lib/messages.js';
 import { openFile } from '../lib/open.js';
 import { MAX_REPORT_LANGS, pickTopic, renderReport, reportFileName } from '../lib/report.js';
 import type { ReportInput, ReportLanguage, ReportTrend } from '../lib/report.js';
+import { assertQidArg } from '../lib/wikidata.js';
 import { SkillError } from '../types.js';
 import type { Lang, Message } from '../types.js';
 import { ARTIFACT_SCHEMA, runAnalyze } from './analyze.js';
@@ -60,7 +61,8 @@ interface StoredLanguage {
   points: Array<{ date: string; perMillion: number | null; smoothed: number }>;
 }
 
-interface StoredArtifact extends Partial<StoredLanguage> {
+/** Parsed analyze or compare artifact as report and research read it back. */
+export interface StoredArtifact extends Partial<StoredLanguage> {
   schema?: number;
   kind?: 'analyze' | 'compare';
   qid: string;
@@ -155,9 +157,7 @@ export function toReportInput(
 
 /** report command: renders the topic's PDF from a stored artifact, rerunning the analysis only if none is usable. */
 export async function runReport(args: ReportArgs): Promise<ReportOutput> {
-  if (!/^Q\d+$/.test(args.qid)) {
-    throw new SkillError('InvalidInput', `--qid "${args.qid}" is not a Wikidata item id`, { qid: args.qid });
-  }
+  assertQidArg(args.qid);
 
   if (args.langs.length === 0) {
     throw new SkillError('InvalidInput', '--langs is required, e.g. --langs en,de,uk');

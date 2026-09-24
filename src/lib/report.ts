@@ -8,6 +8,7 @@ import { packageRoot } from './cache.js';
 import { CHART_HEIGHT, CHART_WIDTH, FONT_FAMILY, lineChart } from './chart.js';
 import type { ChartSeries, TrendBand } from './chart.js';
 import { levelFromScore } from './confidence.js';
+import { addDays } from './dates.js';
 import type { ComponentName, ConfidenceComponent, ConfidenceLevel } from './confidence.js';
 import { message, render } from './messages.js';
 import type { Locale } from './messages.js';
@@ -26,6 +27,15 @@ const PAGE = { width: 595.28, height: 841.89 };
 const CONTENT_WIDTH = PAGE.width - PAGE_MARGIN * 2;
 // Kept free at the bottom of the page for the three footer lines.
 const FOOTER_HEIGHT = 40;
+// Top of the footer's first line, at the bottom of the page wherever the content ended.
+const FOOTER_TOP = PAGE.height - PAGE_MARGIN - FOOTER_HEIGHT + 8;
+// Room kept for the "more caveats" line while caveats still fit.
+const MORE_CAVEATS_LINE_HEIGHT = 12;
+// Table column widths in points; the last column takes whatever is left of the content width.
+const FIXED_COLUMNS = [112, 104, 70, 104, 54];
+const LAST_COLUMN = FIXED_COLUMNS.reduce((rest, width) => rest - width, CONTENT_WIDTH);
+// Padding inside a table cell on every side.
+const CELL_PAD = 3;
 
 /** Per-language caveats printed in the PDF, in print order; codes not listed are left off the page. */
 export const LANGUAGE_CAVEAT_PRIORITY: MessageCode[] = [
@@ -166,6 +176,27 @@ export function reportFileName(name: string, qid: string): string {
   return slug ? `${slug}-${id}.pdf` : `${id}.pdf`;
 }
 
+// Fastest growth first; a missing percent sorts last, and two missing ones tie instead of giving NaN.
+function byGrowth(a: ReportLanguage, b: ReportLanguage): number {
+  const left = a.trend.percentPerYear ?? Number.NEGATIVE_INFINITY;
+  const right = b.trend.percentPerYear ?? Number.NEGATIVE_INFINITY;
+
+  if (left === right) {
+    return 0;
+  }
+
+  return right - left;
+}
+
+// The share of edition traffic is the measure of interest; raw views are only the fallback.
+function primaryTrend(item: ReportLanguage): ReportTrend {
+  return item.relativeTrend ?? item.trend;
+}
+
+function langList(items: ReportLanguage[]): string {
+  return items.map((item) => item.lang).join(', ');
+}
+
 /** Headline verdict for the report, worded from the trend direction, never from the percent alone. */
 export function headline(input: ReportInput): Message {
   const languages = input.languages;
@@ -174,8 +205,7 @@ export function headline(input: ReportInput): Message {
   if (languages.length === 1) {
     const only = languages[0] as ReportLanguage;
 
-    // The share of edition traffic is the measure of interest; raw views are only the fallback.
-    const primary = only.relativeTrend ?? only.trend;
+    const primary = primaryTrend(only);
 
     return message('HEADLINE_SINGLE', {
       topic,
@@ -194,14 +224,14 @@ export function headline(input: ReportInput): Message {
   // Only a confirmed rise counts as growth; the fastest-growing language leads the headline.
   const growing = languages
     .filter((item) => item.trend.direction === 'up')
-    .sort((a, b) => (b.trend.percentPerYear ?? 0) - (a.trend.percentPerYear ?? 0));
+    .sort(byGrowth);
 
   const leader = growing[0];
 
   if (leader) {
     return message('HEADLINE_GROWING', {
       topic,
-      langs: growing.map((item) => item.lang).join(', '),
+      langs: langList(growing),
       leader: leader.lang,
       percent: signed(leader.trend.percentPerYear),
       recent: directionMessage(leader.recentTrend?.direction ?? 'inconclusive'),
@@ -212,11 +242,11 @@ export function headline(input: ReportInput): Message {
 
   if (languages.length > 0 && languages.every((item) => item.trend.direction === 'down')) {
     // When everything declines, the named language is the slowest decline, which is still not growth.
-    const slowest = [...languages].sort((a, b) => (b.trend.percentPerYear ?? 0) - (a.trend.percentPerYear ?? 0))[0];
+    const slowest = [...languages].sort(byGrowth)[0];
 
     return message('HEADLINE_ALL_DOWN', {
       topic,
-      langs: languages.map((item) => item.lang).join(', '),
+      langs: langList(languages),
       leader: slowest?.lang ?? '',
       percent: signed(slowest?.trend.percentPerYear ?? null),
       recent: directionMessage(slowest?.recentTrend?.direction ?? 'inconclusive'),
@@ -229,17 +259,14 @@ export function headline(input: ReportInput): Message {
   if (declining.length > 0) {
     return message('HEADLINE_MIXED_DOWN', {
       topic,
-      down: declining.map((item) => item.lang).join(', '),
-      others: languages
-        .filter((item) => item.trend.direction !== 'down')
-        .map((item) => item.lang)
-        .join(', '),
+      down: langList(declining),
+      others: langList(languages.filter((item) => item.trend.direction !== 'down')),
     });
   }
 
   return message('HEADLINE_NO_CLEAR_DIRECTION', {
     topic,
-    langs: languages.map((item) => item.lang).join(', '),
+    langs: langList(languages),
   });
 }
 
@@ -298,8 +325,6 @@ export function recommendation(input: ReportInput): Message | null {
     return null;
   }
 
-  const byGrowth = (a: ReportLanguage, b: ReportLanguage) =>
-    (b.trend.percentPerYear ?? Number.NEGATIVE_INFINITY) - (a.trend.percentPerYear ?? Number.NEGATIVE_INFINITY);
   const growing = languages.filter((item) => item.trend.direction === 'up').sort(byGrowth);
   // Growth measured with low confidence is not enough to recommend a language.
   const trusted = growing.find((item) => item.confidence.overall !== 'low');
@@ -313,7 +338,7 @@ export function recommendation(input: ReportInput): Message | null {
   }
 
   if (growing.length > 0) {
-    return message('RECOMMEND_NONE_LOW_CONFIDENCE', { langs: growing.map((item) => item.lang).join(', ') });
+    return message('RECOMMEND_NONE_LOW_CONFIDENCE', { langs: langList(growing) });
   }
 
   if (languages.every((item) => item.trend.direction === 'down')) {
@@ -334,15 +359,16 @@ export function explorationOrder(input: ReportInput): Message | null {
   return message('RECOMMEND_ORDER', { order: input.ranking.join(' → ') });
 }
 
+/** The recommendation and the exploration order, whichever of them apply. */
+export function decisionLines(input: ReportInput): Message[] {
+  return [recommendation(input), explorationOrder(input)].filter((line): line is Message => line !== null);
+}
+
 /** Lines under the headline: per-language trust lines, then the recommendation and the exploration order. */
 export function verdictLines(input: ReportInput): Message[] {
   const lines = input.languages.map(trustLine).filter((line): line is Message => line !== null);
 
-  return [...lines, recommendation(input), explorationOrder(input)].filter((line): line is Message => line !== null);
-}
-
-function addDays(date: string, days: number): string {
-  return new Date(Date.parse(`${date}T00:00:00Z`) + days * 86400000).toISOString().slice(0, 10);
+  return [...lines, ...decisionLines(input)];
 }
 
 /** Chart band for a weekly trend: fitted line and 95% slope interval, as per-day values at mid-week dates. */
@@ -377,7 +403,7 @@ export function chartSeries(input: ReportInput): { series: ChartSeries[]; exclud
       continue;
     }
 
-    const trend = item.relativeTrend ?? item.trend;
+    const trend = primaryTrend(item);
 
     series.push({
       id: item.lang,
@@ -532,7 +558,7 @@ export async function renderReport(input: ReportInput, locale: Locale, pdfPath: 
     .font(FONT_REGULAR)
     .fontSize(9)
     .fillColor('#4b5563')
-    .text(t('REPORT_SUBTITLE', { langs: input.languages.map((item) => item.lang).join(', '), from: input.from, to: input.to }), left, y, {
+    .text(t('REPORT_SUBTITLE', { langs: langList(input.languages), from: input.from, to: input.to }), left, y, {
       width: CONTENT_WIDTH,
     });
   y = doc.y + 8;
@@ -542,7 +568,7 @@ export async function renderReport(input: ReportInput, locale: Locale, pdfPath: 
 
   // With many languages, per-language trust lines and article titles are dropped so the page still fits.
   const compact = input.languages.length > COMPACT_FROM_LANGS;
-  const lines = compact ? [recommendation(input), explorationOrder(input)].filter((line): line is Message => line !== null) : verdictLines(input);
+  const lines = compact ? decisionLines(input) : verdictLines(input);
 
   for (const line of lines) {
     doc.font(FONT_REGULAR).fontSize(8.5).fillColor('#1f2937').text(render(line, locale), left, y, { width: CONTENT_WIDTH });
@@ -566,27 +592,27 @@ export async function renderReport(input: ReportInput, locale: Locale, pdfPath: 
     y = doc.y + 4;
   }
 
-  // Widths in points; the last column takes whatever is left of the content width.
+  const widths = [...FIXED_COLUMNS, LAST_COLUMN];
   const columns = [
-    { label: t('REPORT_TABLE_LANG'), width: 112 },
-    { label: t('REPORT_TABLE_RELATIVE'), width: 104 },
-    { label: t('REPORT_TABLE_CI'), width: 70 },
-    { label: t('REPORT_TABLE_RECENT'), width: 104 },
-    { label: t('REPORT_TABLE_MEDIAN'), width: 54 },
-    { label: t('REPORT_TABLE_CONFIDENCE'), width: CONTENT_WIDTH - 112 - 104 - 70 - 104 - 54 },
-  ];
+    t('REPORT_TABLE_LANG'),
+    t('REPORT_TABLE_RELATIVE'),
+    t('REPORT_TABLE_CI'),
+    t('REPORT_TABLE_RECENT'),
+    t('REPORT_TABLE_MEDIAN'),
+    t('REPORT_TABLE_CONFIDENCE'),
+  ].map((label, index) => ({ label, width: widths[index] ?? 60 }));
+  const cellWidth = (index: number) => (columns[index]?.width ?? 60) - CELL_PAD * 2;
 
   const drawRow = (cells: string[], bold: boolean, shaded: boolean, subtitle: string | null = null) => {
-    doc.font(bold ? FONT_BOLD : FONT_REGULAR).fontSize(8);
-    const firstWidth = (columns[0]?.width ?? 60) - 6;
+    const firstWidth = cellWidth(0);
     const subtitleHeight = subtitle ? doc.font(FONT_REGULAR).fontSize(7).heightOfString(subtitle, { width: firstWidth }) : 0;
     doc.font(bold ? FONT_BOLD : FONT_REGULAR).fontSize(8);
     // The first cell also carries the article title under the language code, so it counts both.
     const height =
       Math.max(
-        ...cells.map((cell, index) => doc.heightOfString(cell, { width: (columns[index]?.width ?? 60) - 6 })),
+        ...cells.map((cell, index) => doc.heightOfString(cell, { width: cellWidth(index) })),
         doc.heightOfString(cells[0] ?? '', { width: firstWidth }) + subtitleHeight,
-      ) + 6;
+      ) + CELL_PAD * 2;
 
     if (shaded) {
       doc.rect(left, y, CONTENT_WIDTH, height).fill('#f3f4f6');
@@ -596,10 +622,10 @@ export async function renderReport(input: ReportInput, locale: Locale, pdfPath: 
     cells.forEach((cell, index) => {
       const width = columns[index]?.width ?? 60;
       const font = bold || index === 0 ? FONT_BOLD : FONT_REGULAR;
-      doc.fillColor('#111827').font(font).fontSize(8).text(cell, x + 3, y + 3, { width: width - 6 });
+      doc.fillColor('#111827').font(font).fontSize(8).text(cell, x + CELL_PAD, y + CELL_PAD, { width: cellWidth(index) });
 
       if (index === 0 && subtitle) {
-        doc.fillColor('#4b5563').font(FONT_REGULAR).fontSize(7).text(subtitle, x + 3, doc.y, { width: width - 6 });
+        doc.fillColor('#4b5563').font(FONT_REGULAR).fontSize(7).text(subtitle, x + CELL_PAD, doc.y, { width: cellWidth(index) });
       }
 
       x += width;
@@ -611,7 +637,7 @@ export async function renderReport(input: ReportInput, locale: Locale, pdfPath: 
   drawRow(columns.map((column) => column.label), true, true);
 
   for (const item of input.languages) {
-    const primary = item.relativeTrend ?? item.trend;
+    const primary = primaryTrend(item);
     drawRow(
       [
         item.lang,
@@ -657,7 +683,7 @@ export async function renderReport(input: ReportInput, locale: Locale, pdfPath: 
     const text = `• ${render(caveat, locale)}`;
     const height = doc.heightOfString(text, { width: CONTENT_WIDTH });
     // Leave room for that line unless this is the last caveat.
-    const reserve = shown < caveats.length - 1 ? 12 : 0;
+    const reserve = shown < caveats.length - 1 ? MORE_CAVEATS_LINE_HEIGHT : 0;
 
     if (y + height + reserve > limit) {
       break;
@@ -674,21 +700,19 @@ export async function renderReport(input: ReportInput, locale: Locale, pdfPath: 
       .text(t('REPORT_MORE_CAVEATS', { count: caveats.length - shown }), left, y, { width: CONTENT_WIDTH });
   }
 
-  // The footer sits at the bottom of the page wherever the content ended.
-  const footerY = PAGE.height - PAGE_MARGIN - FOOTER_HEIGHT + 8;
-  doc.moveTo(left, footerY - 4).lineTo(left + CONTENT_WIDTH, footerY - 4).lineWidth(0.3).strokeColor('#d1d5db').stroke();
+  doc.moveTo(left, FOOTER_TOP - 4).lineTo(left + CONTENT_WIDTH, FOOTER_TOP - 4).lineWidth(0.3).strokeColor('#d1d5db').stroke();
   doc.font(FONT_REGULAR).fontSize(6.5).fillColor('#6b7280');
-  doc.text(t('REPORT_FOOTER_SOURCE'), left, footerY, { width: CONTENT_WIDTH, lineBreak: false });
+  doc.text(t('REPORT_FOOTER_SOURCE'), left, FOOTER_TOP, { width: CONTENT_WIDTH, lineBreak: false });
   doc.text(
     `${t('REPORT_FOOTER_GENERATED', { date: new Date().toISOString().slice(0, 16).replace('T', ' ') + ' UTC' })} · ` +
       `${t('REPORT_FOOTER_RANGE', { from: input.from, to: input.to, days: input.days })} · ${input.qid}`,
     left,
-    footerY + 9,
+    FOOTER_TOP + 9,
     { width: CONTENT_WIDTH, lineBreak: false },
   );
   const zero = zeroDaysDetail(input);
   const coverage = [missingDaysDetail(input), ...(zero ? [zero] : [])].map((line) => render(line, locale)).join(' · ');
-  doc.text(coverage, left, footerY + 18, { width: CONTENT_WIDTH, lineBreak: false });
+  doc.text(coverage, left, FOOTER_TOP + 18, { width: CONTENT_WIDTH, lineBreak: false });
 
   doc.end();
   await finished(stream);

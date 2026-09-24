@@ -1,4 +1,5 @@
-const DAY_MS = 24 * 60 * 60 * 1000;
+import { DAY_MS, formatDay, parseDay } from './dates.js';
+import { round as roundTo } from './math.js';
 
 /** Chart width; the viewBox matches the size in points, so one unit is one PDF point. */
 export const CHART_WIDTH = 520;
@@ -12,9 +13,14 @@ export const OUTLIER_COLOR = '#e11d48';
 export const MARKER_COLOR = '#6b7280';
 /** Chart font: DejaVu Sans covers Cyrillic and matches the font embedded in the PDF. */
 export const FONT_FAMILY = 'DejaVuSans';
+/** Colour of titles, legend labels and the fallback series colour. */
+export const TEXT_COLOR = '#111827';
 
 // Left room holds tick labels and the rotated y label; bottom room holds date labels and two legend rows.
 const PAD = { left: 46, right: 12, top: 24, bottom: 52 };
+// No text metrics in a plain SVG string: legends advance by an estimated glyph width for the 7pt font.
+const LEGEND_GLYPH_WIDTH = 4.6;
+const KEY_GLYPH_WIDTH = 4.4;
 
 /** Trend line and its 95% band, one point per week, on the chart's per-day scale. */
 export interface TrendBand {
@@ -80,11 +86,11 @@ export function escapeXml(text: string): string {
 
 /** Whole days since the Unix epoch for a YYYY-MM-DD date read as UTC. */
 export function dayNumber(date: string): number {
-  return Math.round(Date.parse(`${date}T00:00:00Z`) / DAY_MS);
+  return Math.round(parseDay(date) / DAY_MS);
 }
 
 function fromDayNumber(day: number): string {
-  return new Date(day * DAY_MS).toISOString().slice(0, 10);
+  return formatDay(day * DAY_MS);
 }
 
 function finite(values: Array<number | null | undefined>): number[] {
@@ -232,11 +238,12 @@ function formatNumber(value: number): string {
     return String(Math.round(value));
   }
 
-  return String(Math.round(value * 100) / 100);
+  return String(roundTo(value));
 }
 
+// SVG coordinates as strings with at most two decimals.
 function round(value: number): string {
-  return (Math.round(value * 100) / 100).toString();
+  return String(roundTo(value));
 }
 
 // The pen lifts at null points, so missing values leave a gap instead of a bridging line.
@@ -257,19 +264,28 @@ function path(points: Array<[number, number] | null>): string {
   return commands.join('');
 }
 
+// Every plotted value of one series, with the given raw values in place of the series' own.
+function seriesValues(item: ChartSeries, raw: Array<number | null>): Array<number | null> {
+  return [
+    ...raw,
+    ...(item.smoothed ?? []),
+    ...(item.trend?.lower ?? []),
+    ...(item.trend?.upper ?? []),
+    ...(item.trend?.value ?? []),
+  ];
+}
+
+function seriesColor(item: ChartSeries, index: number): string {
+  return item.color ?? PALETTE[index % PALETTE.length] ?? TEXT_COLOR;
+}
+
 /** Values the y scale is fitted to: everything except raw values on spike days, so one spike does not flatten the chart. */
 export function scaleValues(series: ChartSeries[]): Array<number | null> {
   return series.flatMap((item) => {
     const spikes = new Set(item.outliers ?? []);
     const raw = (item.raw ?? []).map((value, index) => (spikes.has(item.dates[index] ?? '') ? null : value));
 
-    return [
-      ...raw,
-      ...(item.smoothed ?? []),
-      ...(item.trend?.lower ?? []),
-      ...(item.trend?.upper ?? []),
-      ...(item.trend?.value ?? []),
-    ];
+    return seriesValues(item, raw);
   });
 }
 
@@ -286,13 +302,7 @@ export function lineChart(series: ChartSeries[], options: ChartOptions = {}): st
   };
 
   // Spikes included: this only decides whether there is anything to draw; the scale comes from scaleValues.
-  const allValues = series.flatMap((item) => [
-    ...(item.raw ?? []),
-    ...(item.smoothed ?? []),
-    ...(item.trend?.lower ?? []),
-    ...(item.trend?.upper ?? []),
-    ...(item.trend?.value ?? []),
-  ]);
+  const allValues = series.flatMap((item) => seriesValues(item, item.raw ?? []));
 
   const x = xDomain(series);
   const y = niceTicks(yDomain(scaleValues(series)));
@@ -312,7 +322,7 @@ export function lineChart(series: ChartSeries[], options: ChartOptions = {}): st
   parts.push(`<rect x="0" y="0" width="${width}" height="${height}" fill="#ffffff"/>`);
 
   if (options.title) {
-    parts.push(`<text x="${plot.left}" y="14" font-size="9" fill="#111827">${text(options.title)}</text>`);
+    parts.push(`<text x="${plot.left}" y="14" font-size="9" fill="${TEXT_COLOR}">${text(options.title)}</text>`);
   }
 
   parts.push('<g class="grid">');
@@ -364,17 +374,24 @@ export function lineChart(series: ChartSeries[], options: ChartOptions = {}): st
   const offScale: string[] = [];
 
   series.forEach((item, index) => {
-    const color = item.color ?? PALETTE[index % PALETTE.length] ?? '#111827';
+    const color = seriesColor(item, index);
     const days = item.dates.map(dayNumber);
+    const linePoints = (values: Array<number | null>) =>
+      days.map((day, point): [number, number] | null => {
+        const value = values[point];
+
+        return typeof value === 'number' && Number.isFinite(value) ? [scaleX(day), scaleY(value)] : null;
+      });
     // Clipped to the plot, because raw spikes can exceed the spike-free scale.
     parts.push(`<g class="series" data-series="${text(item.id)}" clip-path="url(#plot-area)">`);
 
     if (item.trend && item.trend.dates.length > 0) {
-      const trendDays = item.trend.dates.map(dayNumber);
-      const upper = trendDays.map((day, point) => `${round(scaleX(day))},${round(scaleY(item.trend?.upper[point] ?? 0))}`);
+      const band = item.trend;
+      const trendDays = band.dates.map(dayNumber);
+      const upper = trendDays.map((day, point) => `${round(scaleX(day))},${round(scaleY(band.upper[point] ?? 0))}`);
       // Lower edge reversed so the polygon runs out along the upper edge and back along the lower one.
       const lower = trendDays
-        .map((day, point) => `${round(scaleX(day))},${round(scaleY(item.trend?.lower[point] ?? 0))}`)
+        .map((day, point) => `${round(scaleX(day))},${round(scaleY(band.lower[point] ?? 0))}`)
         .reverse();
 
       parts.push(
@@ -382,31 +399,19 @@ export function lineChart(series: ChartSeries[], options: ChartOptions = {}): st
           'stroke="none"/>',
       );
       parts.push(
-        `<path class="trend" d="${path(trendDays.map((day, point) => [scaleX(day), scaleY(item.trend?.value[point] ?? 0)]))}" ` +
+        `<path class="trend" d="${path(trendDays.map((day, point) => [scaleX(day), scaleY(band.value[point] ?? 0)]))}" ` +
           `fill="none" stroke="${color}" stroke-width="0.9" stroke-dasharray="3 2"/>`,
       );
     }
 
     if (item.raw) {
-      const points = days.map((day, point): [number, number] | null => {
-        const value = item.raw?.[point];
-
-        return typeof value === 'number' && Number.isFinite(value) ? [scaleX(day), scaleY(value)] : null;
-      });
-
       parts.push(
-        `<path class="raw" d="${path(points)}" fill="none" stroke="${color}" stroke-width="0.4" stroke-opacity="0.35"/>`,
+        `<path class="raw" d="${path(linePoints(item.raw))}" fill="none" stroke="${color}" stroke-width="0.4" stroke-opacity="0.35"/>`,
       );
     }
 
     if (item.smoothed) {
-      const points = days.map((day, point): [number, number] | null => {
-        const value = item.smoothed?.[point];
-
-        return typeof value === 'number' && Number.isFinite(value) ? [scaleX(day), scaleY(value)] : null;
-      });
-
-      parts.push(`<path class="smoothed" d="${path(points)}" fill="none" stroke="${color}" stroke-width="1.4"/>`);
+      parts.push(`<path class="smoothed" d="${path(linePoints(item.smoothed))}" fill="none" stroke="${color}" stroke-width="1.4"/>`);
     }
 
     if (item.outliers && item.outliers.length > 0) {
@@ -455,37 +460,33 @@ export function lineChart(series: ChartSeries[], options: ChartOptions = {}): st
   let cursor = plot.left;
 
   series.forEach((item, index) => {
-    const color = item.color ?? PALETTE[index % PALETTE.length] ?? '#111827';
+    const color = seriesColor(item, index);
     parts.push(
       `<rect class="legend-swatch" x="${cursor}" y="${legendY - 5}" width="10" height="3" fill="${color}"/>`,
     );
-    parts.push(`<text class="legend" x="${cursor + 13}" y="${legendY - 2}" fill="#111827">${text(item.label)}</text>`);
-    // No text metrics in a plain SVG string: advance by an estimated glyph width for the 7pt font.
-    cursor += 24 + item.label.length * 4.6;
+    parts.push(`<text class="legend" x="${cursor + 13}" y="${legendY - 2}" fill="${TEXT_COLOR}">${text(item.label)}</text>`);
+    cursor += 24 + item.label.length * LEGEND_GLYPH_WIDTH;
   });
 
   const labels = options.legend ?? {};
   const keyY = height - 10;
   let key = plot.left;
+  const keyLine = (at: number, style: string) =>
+    `<line x1="${round(at)}" y1="${keyY - 2}" x2="${round(at + 12)}" y2="${keyY - 2}" stroke="#374151" ${style}/>`;
   const keyItems: Array<{ label: string; shape: (at: number) => string }> = [
     {
       label: labels.raw ?? 'daily',
-      shape: (at) =>
-        `<line x1="${round(at)}" y1="${keyY - 2}" x2="${round(at + 12)}" y2="${keyY - 2}" stroke="#374151" ` +
-        'stroke-width="0.4" stroke-opacity="0.5"/>',
+      shape: (at) => keyLine(at, 'stroke-width="0.4" stroke-opacity="0.5"'),
     },
     {
       label: labels.smoothed ?? '7-day average',
-      shape: (at) =>
-        `<line x1="${round(at)}" y1="${keyY - 2}" x2="${round(at + 12)}" y2="${keyY - 2}" stroke="#374151" ` +
-        'stroke-width="1.4"/>',
+      shape: (at) => keyLine(at, 'stroke-width="1.4"'),
     },
     {
       label: labels.trend ?? 'trend ±95%',
       shape: (at) =>
         `<rect x="${round(at)}" y="${keyY - 5}" width="12" height="6" fill="#374151" fill-opacity="0.12"/>` +
-        `<line x1="${round(at)}" y1="${keyY - 2}" x2="${round(at + 12)}" y2="${keyY - 2}" stroke="#374151" ` +
-        'stroke-width="0.9" stroke-dasharray="3 2"/>',
+        keyLine(at, 'stroke-width="0.9" stroke-dasharray="3 2"'),
     },
     {
       label: labels.outliers ?? 'spike days',
@@ -496,7 +497,7 @@ export function lineChart(series: ChartSeries[], options: ChartOptions = {}): st
   for (const item of keyItems) {
     parts.push(`<g class="key">${item.shape(key)}</g>`);
     parts.push(`<text class="key-label" x="${round(key + 15)}" y="${keyY}" fill="#374151">${text(item.label)}</text>`);
-    key += 30 + item.label.length * 4.4;
+    key += 30 + item.label.length * KEY_GLYPH_WIDTH;
   }
 
   parts.push('</svg>');

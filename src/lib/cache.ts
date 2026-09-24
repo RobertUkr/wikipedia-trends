@@ -3,11 +3,11 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-/** How long cached API responses stay valid: 24 hours. */
-export const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
+// How long cached API responses stay valid: 24 hours.
+const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
 
-/** On-disk cache record; createdAt is an ISO timestamp checked against the TTL. */
-export interface CacheEntry<T> {
+// On-disk cache record; createdAt is an ISO timestamp checked against the TTL.
+interface CacheEntry<T> {
   key: string;
   createdAt: string;
   value: T;
@@ -18,16 +18,19 @@ export function packageRoot(): string {
   return fileURLToPath(new URL('../..', import.meta.url));
 }
 
+// Directory from a non-blank environment variable, else the named folder in the repository.
+function dirFromEnv(name: string, fallback: string): string {
+  return process.env[name]?.trim() || join(packageRoot(), fallback);
+}
+
 /** Directory for cached API responses: WIKIPEDIA_TRENDS_CACHE_DIR or .cache/ in the repository. */
 export function cacheDir(): string {
-  const override = process.env['WIKIPEDIA_TRENDS_CACHE_DIR']?.trim();
-  return override && override.length > 0 ? override : join(packageRoot(), '.cache');
+  return dirFromEnv('WIKIPEDIA_TRENDS_CACHE_DIR', '.cache');
 }
 
 /** Directory for series, artifacts and reports: WIKIPEDIA_TRENDS_OUTPUT_DIR or output/ in the repository. */
 export function outputDir(): string {
-  const override = process.env['WIKIPEDIA_TRENDS_OUTPUT_DIR']?.trim();
-  return override && override.length > 0 ? override : join(packageRoot(), 'output');
+  return dirFromEnv('WIKIPEDIA_TRENDS_OUTPUT_DIR', 'output');
 }
 
 /** Writes a pretty-printed JSON artifact to `file`, creating the output directory first. */
@@ -51,9 +54,10 @@ function entryPath(key: string): string {
 
 /** Cached value for the key, or null when it is missing, corrupt or older than the TTL. */
 export async function readCache<T>(key: string, ttlMs: number = DEFAULT_TTL_MS): Promise<T | null> {
+  const path = entryPath(key);
   let raw: string;
   try {
-    raw = await readFile(entryPath(key), 'utf8');
+    raw = await readFile(path, 'utf8');
   } catch {
     return null;
   }
@@ -63,14 +67,14 @@ export async function readCache<T>(key: string, ttlMs: number = DEFAULT_TTL_MS):
     entry = JSON.parse(raw) as CacheEntry<T>;
   } catch {
     // A corrupt entry is removed so the next write replaces it cleanly.
-    await rm(entryPath(key), { force: true });
+    await rm(path, { force: true });
     return null;
   }
 
   const createdAt = Date.parse(entry.createdAt ?? '');
   // An entry with a missing or unparsable timestamp counts as expired.
   if (!Number.isFinite(createdAt) || Date.now() - createdAt >= ttlMs) {
-    await rm(entryPath(key), { force: true });
+    await rm(path, { force: true });
     return null;
   }
 
@@ -82,9 +86,4 @@ export async function writeCache<T>(key: string, value: T): Promise<void> {
   await mkdir(cacheDir(), { recursive: true });
   const entry: CacheEntry<T> = { key, createdAt: new Date().toISOString(), value };
   await writeFile(entryPath(key), JSON.stringify(entry), 'utf8');
-}
-
-/** Deletes the whole cache directory. */
-export async function clearCache(): Promise<void> {
-  await rm(cacheDir(), { recursive: true, force: true });
 }

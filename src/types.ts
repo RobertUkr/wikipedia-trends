@@ -36,16 +36,6 @@ export interface DailyPoint {
   views: number;
 }
 
-/** Daily pageviews of one article in one edition. */
-export interface ArticleViews {
-  project: string;
-  title: string;
-  access: string;
-  agent: string;
-  granularity: string;
-  points: DailyPoint[];
-}
-
 /** Daily pageviews of a whole edition, used to turn article views into a share per million. */
 export interface ProjectTotals {
   project: string;
@@ -53,6 +43,11 @@ export interface ProjectTotals {
   agent: string;
   granularity: string;
   points: DailyPoint[];
+}
+
+/** Daily pageviews of one article in one edition. */
+export interface ArticleViews extends ProjectTotals {
+  title: string;
 }
 
 /** Codes of localized texts (caveats, verdicts, report and chart labels); en/uk dictionaries live in lib/messages.ts. */

@@ -8,10 +8,10 @@ import type {
   TopicResolution,
 } from '../types.js';
 import { message } from './messages.js';
-import { normalizeProject, requestJson, searchArticles } from './wikimedia.js';
+import { actionApiUrl, articleUrl, normalizeProject, requestJson, searchArticles } from './wikimedia.js';
 import type { RequestOptions } from './wikimedia.js';
 
-const API = 'https://www.wikidata.org/w/api.php';
+const WIKIDATA_HOST = 'www.wikidata.org';
 // Wikidata search results fetched; only the top INSPECT_LIMIT are checked for sitelinks.
 const SEARCH_LIMIT = 7;
 const INSPECT_LIMIT = 5;
@@ -133,13 +133,11 @@ async function fetchSitelinkMap(
   if (qids.length === 0) {
     return {};
   }
-  const url = `${API}?${new URLSearchParams({
+  const url = actionApiUrl(WIKIDATA_HOST, {
     action: 'wbgetentities',
     ids: qids.join('|'),
     props: 'sitelinks',
-    format: 'json',
-    formatversion: '2',
-  }).toString()}`;
+  });
 
   const payload = await requestJson<EntitiesResponse>(url, opts);
   const result: Record<string, Record<Lang, string>> = {};
@@ -176,6 +174,24 @@ export async function getSitelinks(qid: string, opts: RequestOptions = {}): Prom
   return titles;
 }
 
+// Wikidata items matching the query, keeping only entries with an id.
+async function searchEntities(
+  query: string,
+  sourceLang: string,
+  opts: RequestOptions,
+): Promise<Array<SearchEntry & { id: string }>> {
+  const url = actionApiUrl(WIKIDATA_HOST, {
+    action: 'wbsearchentities',
+    search: query,
+    language: sourceLang,
+    uselang: sourceLang,
+    type: 'item',
+    limit: String(SEARCH_LIMIT),
+  });
+  const payload = await requestJson<SearchResponse>(url, opts);
+  return (payload.search ?? []).filter((entry): entry is SearchEntry & { id: string } => typeof entry.id === 'string');
+}
+
 /** Resolves a topic query to a Wikidata item and its articles, falling back to Wikipedia search for phrases. */
 export async function resolveTopic(
   query: string,
@@ -187,24 +203,12 @@ export async function resolveTopic(
     throw new SkillError('InvalidInput', 'Topic query must not be empty');
   }
 
-  const url = `${API}?${new URLSearchParams({
-    action: 'wbsearchentities',
-    search: trimmed,
-    language: sourceLang,
-    uselang: sourceLang,
-    type: 'item',
-    limit: String(SEARCH_LIMIT),
-    format: 'json',
-    formatversion: '2',
-  }).toString()}`;
+  let entries = await searchEntities(trimmed, sourceLang, opts);
 
-  const search = async (): Promise<Array<SearchEntry & { id: string }>> => {
-    const payload = await requestJson<SearchResponse>(url, opts);
-    return (payload.search ?? []).filter((entry): entry is SearchEntry & { id: string } =>
-      typeof entry.id === 'string');
-  };
-
-  const entries = await search().then((found) => (found.length > 0 ? found : search()));
+  // An empty result is retried once.
+  if (entries.length === 0) {
+    entries = await searchEntities(trimmed, sourceLang, opts);
+  }
 
   if (entries.length === 0) {
     const fromArticles = await resolveByArticleSearch(trimmed, sourceLang, opts);
@@ -224,6 +228,7 @@ export async function resolveTopic(
     inspected.map((item) => item.entry.id),
     opts,
   );
+  const titlesOf = (qid: string): Record<Lang, string> => sitelinkMap[qid] ?? {};
 
   // Items without Wikipedia articles and disambiguation pages cannot be analysed.
   const candidates: TopicCandidate[] = inspected
@@ -232,12 +237,12 @@ export async function resolveTopic(
       label: item.entry.label ?? '',
       description: item.entry.description ?? '',
       score: item.score,
-      wikiCount: Object.keys(sitelinkMap[item.entry.id] ?? {}).length,
+      wikiCount: Object.keys(titlesOf(item.entry.id)).length,
     }))
-    .filter((candidate) => candidate.wikiCount > 0 && !isDisambiguation(candidate, sitelinkMap[candidate.qid] ?? {}));
+    .filter((candidate) => candidate.wikiCount > 0 && !isDisambiguation(candidate, titlesOf(candidate.qid)));
   // An item whose source-language article is titled exactly like the query stays in contention regardless of score.
   const namesArticle = (candidate: TopicCandidate) =>
-    normalize(sitelinkMap[candidate.qid]?.[sourceLang]) === normalize(trimmed);
+    normalize(titlesOf(candidate.qid)[sourceLang]) === normalize(trimmed);
 
   const top = candidates[0];
 
@@ -263,12 +268,12 @@ export async function resolveTopic(
     qid: best.qid,
     label: best.label,
     description: best.description,
-    titles: sitelinkMap[best.qid] ?? {},
+    titles: titlesOf(best.qid),
     // Candidates are returned only when the user has a real choice to make.
     candidates: close.length > 1 ? close : [],
     others: candidates
       .filter((candidate) => candidate.qid !== best.qid)
-      .map((candidate) => ({ ...candidate, titles: sitelinkMap[candidate.qid] ?? {} })),
+      .map((candidate) => ({ ...candidate, titles: titlesOf(candidate.qid) })),
     matchedBy: 'wikidata',
   };
 }
@@ -285,8 +290,8 @@ interface ArticleEntitiesResponse {
   >;
 }
 
-/** Fallback for phrases that are not item labels: Wikipedia search hits mapped to their Wikidata items. */
-export async function resolveByArticleSearch(
+// Fallback for phrases that are not item labels: Wikipedia search hits mapped to their Wikidata items.
+async function resolveByArticleSearch(
   query: string,
   sourceLang: string,
   opts: RequestOptions = {},
@@ -298,15 +303,13 @@ export async function resolveByArticleSearch(
 
   // Wikidata site id of the edition, e.g. zh-min-nan -> zh_min_nanwiki.
   const site = `${sourceLang.replace(/-/g, '_')}wiki`;
-  const url = `${API}?${new URLSearchParams({
+  const url = actionApiUrl(WIKIDATA_HOST, {
     action: 'wbgetentities',
     sites: site,
     titles: found.hits.map((hit) => hit.title).join('|'),
     props: 'labels|descriptions|sitelinks',
     languages: sourceLang,
-    format: 'json',
-    formatversion: '2',
-  }).toString()}`;
+  });
 
   const payload = await requestJson<ArticleEntitiesResponse>(url, opts);
   const entities = Object.values(payload.entities ?? {}).filter(
@@ -397,7 +400,7 @@ export function classifySearchResult(lang: Lang, query: string, result: ArticleS
       title: hit.title,
       score: titleSimilarity(query, hit.title),
       snippet: hit.snippet,
-      url: `https://${project}/wiki/${encodeURIComponent(hit.title.replace(/ /g, '_'))}`,
+      url: articleUrl(project, hit.title),
       confirmed: false as const,
     }))
     .filter((candidate) => candidate.score >= ALTERNATIVE_MIN_SCORE)
@@ -442,14 +445,12 @@ export async function getLabels(
   if (langs.length === 0) {
     return {};
   }
-  const url = `${API}?${new URLSearchParams({
+  const url = actionApiUrl(WIKIDATA_HOST, {
     action: 'wbgetentities',
     ids: qid,
     props: 'labels|aliases',
     languages: langs.join('|'),
-    format: 'json',
-    formatversion: '2',
-  }).toString()}`;
+  });
 
   const payload = await requestJson<LabelsResponse>(url, opts);
   const entity = payload.entities?.[qid];
@@ -484,13 +485,14 @@ export async function probeLanguages(
       results.push(classifySearchResult(lang, query, search));
     } catch (error) {
       // A failed search is reported for that language instead of aborting the others.
+      const project = normalizeProject(lang);
       results.push({
         lang,
-        project: normalizeProject(lang),
+        project,
         status: 'fetch_failed',
         title: null,
         reason: message('SEARCH_FAILED', {
-          project: normalizeProject(lang),
+          project,
           error: error instanceof Error ? error.message : String(error),
         }),
         requiresConfirmation: false,
@@ -504,8 +506,8 @@ export async function probeLanguages(
   return results;
 }
 
-/** Page limit when reading an item's revision history (500 revisions per page). */
-export const MAX_HISTORY_PAGES = 20;
+// Page limit when reading an item's revision history (500 revisions per page).
+const MAX_HISTORY_PAGES = 20;
 
 /** Edit summary of a Wikidata item revision, parsed for sitelink changes to trace renames. */
 export interface RevisionComment {
@@ -524,23 +526,18 @@ export async function getRevisionComments(qid: string, since: string, opts: Requ
   let next: string | undefined;
 
   for (let page = 0; page < MAX_HISTORY_PAGES; page += 1) {
-    const params = new URLSearchParams({
+    const url = actionApiUrl(WIKIDATA_HOST, {
       action: 'query',
       prop: 'revisions',
       titles: qid,
       rvprop: 'timestamp|comment',
       // 500 is the per-request maximum for regular (non-bot) clients.
       rvlimit: '500',
-      format: 'json',
-      formatversion: '2',
+      // Continue from where the previous page of older revisions ended.
+      ...(next ? { rvcontinue: next } : {}),
     });
 
-    // Continue from where the previous page of older revisions ended.
-    if (next) {
-      params.set('rvcontinue', next);
-    }
-
-    const payload = await requestJson<RevisionsResponse>(`${API}?${params.toString()}`, opts);
+    const payload = await requestJson<RevisionsResponse>(url, opts);
     const batch = (payload.query?.pages?.[0]?.revisions ?? []).map((revision) => ({
       timestamp: revision.timestamp ?? '',
       comment: revision.comment ?? '',

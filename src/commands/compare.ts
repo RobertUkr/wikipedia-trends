@@ -1,15 +1,15 @@
-import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { outputDir } from '../lib/cache.js';
+import { outputDir, writeArtifact } from '../lib/cache.js';
+import { round } from '../lib/math.js';
 import { message, renderAll } from '../lib/messages.js';
 import type { Locale } from '../lib/messages.js';
-import { getSitelinks, probeLanguages } from '../lib/wikidata.js';
-import { normalizeProject } from '../lib/wikimedia.js';
+import { assertQidArg, getSitelinks, probeLanguages } from '../lib/wikidata.js';
 import { ArticleNotFound, SkillError } from '../types.js';
 import type { Lang, LanguageAvailability, Message } from '../types.js';
-import { ARTIFACT_SCHEMA, analyzeLanguage, trendReport } from './analyze.js';
+import { ARTIFACT_SCHEMA, analyzeLanguage, trendReport, trendReports } from './analyze.js';
 import type { LanguageAnalysis } from './analyze.js';
 import type { Direction } from '../lib/stats.js';
+import { failedLanguage, fallbackQuery } from './unavailable.js';
 
 /** Weights of the perspective score: growth, level of attention and confidence. */
 export const WEIGHTS = { growth: 0.5, level: 0.3, confidence: 0.2 } as const;
@@ -132,7 +132,7 @@ export function rank(analyses: LanguageAnalysis[]): RankedLanguage[] {
         rank: 0,
         lang: item.lang,
         title: item.title,
-        medianPerMillion: item.unit === 'views_per_million' ? Math.round(item.level.median * 100) / 100 : null,
+        medianPerMillion: item.unit === 'views_per_million' ? round(item.level.median) : null,
         percentPerYear: item.trend.percentPerYear,
         ci95: item.trend.ci95,
         direction: item.trend.direction,
@@ -141,7 +141,7 @@ export function rank(analyses: LanguageAnalysis[]): RankedLanguage[] {
         recentDirection: item.recentTrend?.direction ?? null,
         confidence: item.confidence.overall,
         confidenceScore: item.confidence.score,
-        perspective: Math.round(perspective * 1000) / 1000,
+        perspective: round(perspective, 3),
         notes: notes.length > 0 ? notes : [message('NOTE_NO_RESERVATIONS')],
       };
     })
@@ -151,9 +151,7 @@ export function rank(analyses: LanguageAnalysis[]): RankedLanguage[] {
 
 /** compare command: analyses each edition and ranks them; editions that drop out go to unavailable with a reason. */
 export async function runCompare(args: CompareArgs): Promise<CompareOutput> {
-  if (!/^Q\d+$/.test(args.qid)) {
-    throw new SkillError('InvalidInput', `--qid "${args.qid}" is not a Wikidata item id`, { qid: args.qid });
-  }
+  assertQidArg(args.qid);
 
   if (args.langs.length < 2) {
     throw new SkillError('InvalidInput', 'compare needs at least two languages, e.g. --langs cs,uk', {
@@ -163,11 +161,7 @@ export async function runCompare(args: CompareArgs): Promise<CompareOutput> {
 
   const titles = await getSitelinks(args.qid);
   const missing = args.langs.filter((lang) => !titles[lang]);
-  const unavailable: LanguageAvailability[] = await probeLanguages(
-    args.qid,
-    missing,
-    titles['en'] ?? Object.values(titles)[0] ?? args.qid,
-  );
+  const unavailable: LanguageAvailability[] = await probeLanguages(args.qid, missing, fallbackQuery(titles, args.qid));
 
   const analyses: LanguageAnalysis[] = [];
 
@@ -183,24 +177,22 @@ export async function runCompare(args: CompareArgs): Promise<CompareOutput> {
     } catch (error) {
       // A language that cannot be analysed is a finding about that language, not a failure of the comparison.
       if (error instanceof SkillError) {
-        unavailable.push({
-          lang,
-          project: normalizeProject(lang),
-          status: error.code === 'ShortHistory' ? 'short_history' : error instanceof ArticleNotFound ? 'no_data' : 'fetch_failed',
-          title,
-          reason:
-            error.code === 'ShortHistory'
+        const short = error.code === 'ShortHistory';
+
+        unavailable.push(
+          failedLanguage(
+            lang,
+            title,
+            short ? 'short_history' : error instanceof ArticleNotFound ? 'no_data' : 'fetch_failed',
+            short
               ? message('SHORT_HISTORY', {
                   title,
-                  first: String(error.details?.['first'] ?? ''),
-                  last: String(error.details?.['last'] ?? ''),
+                  first: String(error.details['first'] ?? ''),
+                  last: String(error.details['last'] ?? ''),
                 })
               : message('LANGUAGE_FETCH_FAILED', { code: error.code, message: error.message }),
-          requiresConfirmation: false,
-          searchQuery: null,
-          searchHits: 0,
-          alternatives: [],
-        });
+          ),
+        );
         continue;
       }
 
@@ -220,71 +212,51 @@ export async function runCompare(args: CompareArgs): Promise<CompareOutput> {
   const comparable = analyses.every((item) => item.unit === 'views_per_million');
   const caveats = buildCompareCaveats(analyses, comparable);
 
-  const dir = outputDir();
-  await mkdir(dir, { recursive: true });
-  const file = args.out ?? join(dir, `compare-${args.qid}.json`);
+  const file = args.out ?? join(outputDir(), `compare-${args.qid}.json`);
 
-  await writeFile(
-    file,
-    JSON.stringify(
-      {
-        schema: ARTIFACT_SCHEMA,
-        kind: 'compare',
-        qid: args.qid,
-        from: args.from,
-        to: args.to,
-        days: analyses[0]?.days ?? 0,
-        comparedAt: new Date().toISOString(),
-        caveats,
-        criterion: CRITERION,
-        weights: WEIGHTS,
-        comparable,
-        ranking,
-        unavailable,
-        languages: analyses.map((item) => ({
-          lang: item.lang,
-          project: item.project,
-          title: item.title,
-          unit: item.unit,
-          days: item.days,
-          primary: item.primary,
-          trend: trendReport(item.fit, item.trend),
-          absoluteTrend: trendReport(item.absoluteFit, item.absoluteTrend),
-          relativeTrend: item.relativeTrend ? trendReport(item.fit, item.relativeTrend) : null,
-          recentTrend:
-            item.recentFit && item.recentTrend
-              ? {
-                  ...trendReport(item.recentFit, item.recentTrend),
-                  weeks: item.recentWeeks,
-                  from: item.recentFrom,
-                  startWeek: item.weekly.weeks - item.recentWeeks,
-                }
-              : null,
-          reversal: item.reversal,
-          missingDays: item.series.missingDays,
-          zeroDays: item.series.zeroDays,
-          yoy: item.yoy,
-          level: item.level,
-          rawLevel: item.rawLevel,
-          seasonality: {
-            available: item.season.available,
-            detected: item.season.detected,
-            strength: item.season.strength,
-            cyclesAvailable: item.season.cyclesAvailable,
-            reason: item.season.reason,
-          },
-          granularity: 'weekly',
-          n_effective: item.weekly.weeks,
-          outliers: { excluded: item.outlierIndices.length, dates: item.outlierDates },
-          confidence: item.confidence,
-          points: item.series.points,
-        })),
+  await writeArtifact(file, {
+    schema: ARTIFACT_SCHEMA,
+    kind: 'compare',
+    qid: args.qid,
+    from: args.from,
+    to: args.to,
+    days: analyses[0]?.days ?? 0,
+    comparedAt: new Date().toISOString(),
+    caveats,
+    criterion: CRITERION,
+    weights: WEIGHTS,
+    comparable,
+    ranking,
+    unavailable,
+    languages: analyses.map((item) => ({
+      lang: item.lang,
+      project: item.project,
+      title: item.title,
+      unit: item.unit,
+      days: item.days,
+      primary: item.primary,
+      trend: trendReport(item.fit, item.trend),
+      ...trendReports(item),
+      reversal: item.reversal,
+      missingDays: item.series.missingDays,
+      zeroDays: item.series.zeroDays,
+      yoy: item.yoy,
+      level: item.level,
+      rawLevel: item.rawLevel,
+      seasonality: {
+        available: item.season.available,
+        detected: item.season.detected,
+        strength: item.season.strength,
+        cyclesAvailable: item.season.cyclesAvailable,
+        reason: item.season.reason,
       },
-      null,
-      2,
-    ),
-    'utf8',
-  );
+      granularity: 'weekly',
+      n_effective: item.weekly.weeks,
+      outliers: { excluded: item.outlierIndices.length, dates: item.outlierDates },
+      confidence: item.confidence,
+      points: item.series.points,
+    })),
+  });
 
   return {
     ok: true,

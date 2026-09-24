@@ -1,6 +1,8 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { outputDir } from '../lib/cache.js';
+import { outputDir, writeArtifact } from '../lib/cache.js';
+import { DAY_MS, formatDay } from '../lib/dates.js';
+import { round } from '../lib/math.js';
 import { render } from '../lib/messages.js';
 import type { Locale } from '../lib/messages.js';
 import { MAX_REPORT_LANGS, confidenceMessage, directionMessage, headline, selectCaveats, signed, verdictLines } from '../lib/report.js';
@@ -12,9 +14,9 @@ import type { Lang, LanguageAvailability } from '../types.js';
 import { runAnalyze } from './analyze.js';
 import { runCompare } from './compare.js';
 import { artifactPath, runReport, toReportInput } from './report.js';
+import type { StoredArtifact } from './report.js';
 import { runResolve } from './resolve.js';
-
-const DAY_MS = 24 * 60 * 60 * 1000;
+import type { ResolveOutput } from './resolve.js';
 
 /** Years analysed when neither --years nor --from/--to is given. */
 export const DEFAULT_YEARS = 2;
@@ -84,13 +86,26 @@ export type ResearchOutput =
 /** Range of the last `years` years, ending DATA_LAG_DAYS before today. */
 export function defaultRange(years: number, today: Date = new Date()): { from: string; to: string } {
   const end = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()) - DATA_LAG_DAYS * DAY_MS);
-  const start = new Date(Date.UTC(end.getUTCFullYear() - years, end.getUTCMonth(), end.getUTCDate()) + DAY_MS);
+  const start = Date.UTC(end.getUTCFullYear() - years, end.getUTCMonth(), end.getUTCDate()) + DAY_MS;
 
-  return { from: start.toISOString().slice(0, 10), to: end.toISOString().slice(0, 10) };
+  return { from: formatDay(start), to: formatDay(end.getTime()) };
 }
 
-function describeUnavailable(items: LanguageAvailability[], locale: Locale): Array<{ lang: Lang; status: string; reason: string }> {
+type DescribedUnavailable = Array<{ lang: Lang; status: string; reason: string }>;
+
+function describeUnavailable(items: LanguageAvailability[], locale: Locale): DescribedUnavailable {
   return items.map((item) => ({ lang: item.lang, status: item.status, reason: render(item.reason, locale) }));
+}
+
+// An edition already known as unavailable keeps its first reason.
+function mergeUnavailable(known: LanguageAvailability[], extra: LanguageAvailability[]): LanguageAvailability[] {
+  return [...known, ...extra.filter((item) => !known.some((entry) => entry.lang === item.lang))];
+}
+
+function withoutUnavailable(langs: Lang[], items: LanguageAvailability[]): Lang[] {
+  const dropped = new Set(items.map((item) => item.lang));
+
+  return langs.filter((lang) => !dropped.has(lang));
 }
 
 /** Builds `summary`, the text the agent pastes verbatim as its whole answer. */
@@ -162,13 +177,14 @@ export async function reportLanguages(qid: string, langs: Lang[]): Promise<Lang[
 }
 
 async function saveReportLanguages(qid: string, langs: Lang[]): Promise<void> {
-  await writeFile(reportLanguagesPath(qid), JSON.stringify({ qid, langs }, null, 2), 'utf8');
+  await writeArtifact(reportLanguagesPath(qid), { qid, langs });
 }
 
 /** Summary line and headline figures of one language, from its relative trend when available. */
 export function languageLine(item: ReportLanguage, locale: Locale): ResearchLanguage {
   const primary = item.relativeTrend ?? item.trend;
   const recent = item.recentTrend;
+  const level = round(item.medianPerMillion);
 
   return {
     lang: item.lang,
@@ -179,7 +195,7 @@ export function languageLine(item: ReportLanguage, locale: Locale): ResearchLang
     recentDirection: recent?.direction ?? null,
     recentPercentPerYear: recent?.percentPerYear ?? null,
     confidence: item.confidence.overall,
-    medianPerMillion: Math.round(item.medianPerMillion * 100) / 100,
+    medianPerMillion: level,
     text: render(
       {
         code: 'RESEARCH_LANGUAGE_LINE',
@@ -192,13 +208,104 @@ export function languageLine(item: ReportLanguage, locale: Locale): ResearchLang
           recent: directionMessage(recent?.direction ?? 'inconclusive'),
           since: recent?.from ?? '—',
           recentPercent: signed(recent?.percentPerYear ?? null),
-          level: Math.round(item.medianPerMillion * 100) / 100,
+          level,
           confidence: confidenceMessage(item.confidence.overall),
         },
       },
       locale,
     ),
   };
+}
+
+// An ambiguous topic or a phrase matched by article search is not guessed: the user picks a candidate.
+function choiceOutput(resolved: ResolveOutput, topic: string, args: ResearchArgs): ResearchOutput {
+  const code = resolved.matchedBy === 'article_search' ? 'RESEARCH_SEARCH_MATCHES' : 'RESEARCH_NEEDS_CHOICE';
+  const message = render({ code, params: { topic, lang: args.lang } }, args.locale);
+  const candidates = resolved.candidates.map((item) => ({
+    qid: item.qid,
+    label: item.label,
+    description: item.description,
+    langs: item.langs,
+  }));
+
+  return {
+    ok: true,
+    command: 'research',
+    status: 'needs_choice',
+    topic,
+    message,
+    summary: [
+      message,
+      '',
+      ...candidates.map((item) => {
+        const line = render(
+          { code: 'RESEARCH_CANDIDATE', params: { qid: item.qid, label: item.label, description: item.description } },
+          args.locale,
+        ).replace(/ — $/, '');
+        const coverage = render(
+          {
+            code: 'RESEARCH_CANDIDATE_COVERAGE',
+            params: { langs: item.langs.length > 0 ? item.langs.join(', ') : '—', requested: args.langs.join(', ') },
+          },
+          args.locale,
+        );
+
+        return `- ${line} ${coverage}`;
+      }),
+    ].join('\n'),
+    candidates,
+    unavailable: [],
+  };
+}
+
+function noArticlesOutput(topic: string, unavailable: LanguageAvailability[], args: ResearchArgs): ResearchOutput {
+  const message = render({ code: 'RESEARCH_NO_ARTICLES', params: { topic, langs: args.langs.join(', ') } }, args.locale);
+  const missing = describeUnavailable(unavailable, args.locale);
+
+  return {
+    ok: true,
+    command: 'research',
+    status: 'no_articles',
+    topic,
+    message,
+    summary: [message, '', ...missing.map((item) => `- ${item.lang}: ${item.reason}`)].join('\n'),
+    candidates: [],
+    unavailable: missing,
+  };
+}
+
+// The report holds more languages than were requested, so they are compared together into a separate artifact.
+async function widenReport(
+  qid: string,
+  reportLangs: Lang[],
+  range: { from: string; to: string },
+  unavailable: LanguageAvailability[],
+  args: ResearchArgs,
+): Promise<{ langs: Lang[]; artifact: string; missing: DescribedUnavailable } | null> {
+  try {
+    const union = await runCompare({
+      qid,
+      langs: reportLangs,
+      from: range.from,
+      to: range.to,
+      noCache: args.noCache,
+      out: join(outputDir(), `report-compare-${qid}.json`),
+      locale: null,
+    });
+
+    return {
+      langs: withoutUnavailable(reportLangs, union.unavailable),
+      artifact: union.file,
+      missing: describeUnavailable(mergeUnavailable(unavailable, union.unavailable), args.locale),
+    };
+  } catch (error) {
+    if (!(error instanceof SkillError)) {
+      throw error;
+    }
+
+    // If the wider comparison fails, the report falls back to the requested languages.
+    return null;
+  }
 }
 
 /** Full pipeline for one topic: resolve, analyse or compare, render the PDF and build the ready-to-paste summary. */
@@ -230,84 +337,23 @@ export async function runResearch(args: ResearchArgs): Promise<ResearchOutput> {
   let unavailable: LanguageAvailability[] = [];
 
   if (!qid) {
-    const resolved = await runResolve({ topic: args.topic as string, lang: args.lang, langs: args.langs });
+    // Without a qid the topic is the non-empty --topic checked above.
+    const resolved = await runResolve({ topic, lang: args.lang, langs: args.langs });
 
-    // An ambiguous topic or a phrase matched by article search is not guessed: the user picks a candidate.
     if (resolved.ambiguous) {
-      const code = resolved.matchedBy === 'article_search' ? 'RESEARCH_SEARCH_MATCHES' : 'RESEARCH_NEEDS_CHOICE';
-      const message = render({ code, params: { topic, lang: args.lang } }, args.locale);
-      const candidates = resolved.candidates.map((item) => ({
-        qid: item.qid,
-        label: item.label,
-        description: item.description,
-        langs: item.langs,
-      }));
-
-      return {
-        ok: true,
-        command: 'research',
-        status: 'needs_choice',
-        topic,
-        message,
-        summary: [
-          message,
-          '',
-          ...candidates.map(
-            (item) => {
-              const line = render(
-                { code: 'RESEARCH_CANDIDATE', params: { qid: item.qid, label: item.label, description: item.description } },
-                args.locale,
-              ).replace(/ — $/, '');
-              const coverage = render(
-                {
-                  code: 'RESEARCH_CANDIDATE_COVERAGE',
-                  params: { langs: item.langs.length > 0 ? item.langs.join(', ') : '—', requested: args.langs.join(', ') },
-                },
-                args.locale,
-              );
-
-              return `- ${line} ${coverage}`;
-            },
-          ),
-        ].join('\n'),
-        candidates,
-        unavailable: [],
-      };
+      return choiceOutput(resolved, topic, args);
     }
 
     qid = resolved.qid;
     topic = resolved.label || topic;
     unavailable = resolved.unavailable;
     // Editions without an article are not analysed and are reported as unavailable.
-    const missing = new Set(unavailable.map((item) => item.lang));
-    langs = args.langs.filter((lang) => !missing.has(lang));
+    langs = withoutUnavailable(args.langs, unavailable);
   }
-
-  const noArticles = (): ResearchOutput => {
-    const message = render({ code: 'RESEARCH_NO_ARTICLES', params: { topic, langs: args.langs.join(', ') } }, args.locale);
-    const missing = describeUnavailable(unavailable, args.locale);
-
-    return {
-      ok: true,
-      command: 'research',
-      status: 'no_articles',
-      topic,
-      message,
-      summary: [message, '', ...missing.map((item) => `- ${item.lang}: ${item.reason}`)].join('\n'),
-      candidates: [],
-      unavailable: missing,
-    };
-  };
 
   if (langs.length === 0) {
-    return noArticles();
+    return noArticlesOutput(topic, unavailable, args);
   }
-
-  const addUnavailable = (items: LanguageAvailability[]) => {
-    unavailable = [...unavailable, ...items.filter((item) => !unavailable.some((known) => known.lang === item.lang))];
-    const failed = new Set(items.map((item) => item.lang));
-    langs = langs.filter((lang) => !failed.has(lang));
-  };
 
   let artifact = artifactPath(qid, langs);
 
@@ -322,7 +368,8 @@ export async function runResearch(args: ResearchArgs): Promise<ResearchOutput> {
         out: artifact,
         locale: null,
       });
-      addUnavailable(compared.unavailable);
+      unavailable = mergeUnavailable(unavailable, compared.unavailable);
+      langs = withoutUnavailable(langs, compared.unavailable);
     } catch (error) {
       // compare throws when fewer than two languages have data; its details list the ones that dropped out.
       const failed = error instanceof SkillError ? error.details['unavailable'] : undefined;
@@ -331,10 +378,11 @@ export async function runResearch(args: ResearchArgs): Promise<ResearchOutput> {
         throw error;
       }
 
-      addUnavailable(failed as LanguageAvailability[]);
+      unavailable = mergeUnavailable(unavailable, failed as LanguageAvailability[]);
+      langs = withoutUnavailable(langs, failed as LanguageAvailability[]);
 
       if (langs.length === 0) {
-        return noArticles();
+        return noArticlesOutput(topic, unavailable, args);
       }
 
       artifact = artifactPath(qid, langs);
@@ -354,38 +402,12 @@ export async function runResearch(args: ResearchArgs): Promise<ResearchOutput> {
   const missing = describeUnavailable(unavailable, args.locale);
 
   // Report languages accumulate across follow-ups, while the chat summary covers only the requested languages.
-  let reportLangs = await reportLanguages(qid, langs);
-  let reportArtifact = artifact;
-  let reportMissing = missing;
-
-  // The report holds more languages than were requested, so they are compared together into a separate artifact.
-  if (reportLangs.length > langs.length) {
-    try {
-      const union = await runCompare({
-        qid,
-        langs: reportLangs,
-        from: range.from,
-        to: range.to,
-        noCache: args.noCache,
-        out: join(outputDir(), `report-compare-${qid}.json`),
-        locale: null,
-      });
-      const failed = new Set(union.unavailable.map((item) => item.lang));
-      reportLangs = reportLangs.filter((lang) => !failed.has(lang));
-      reportArtifact = union.file;
-      reportMissing = describeUnavailable(
-        [...unavailable, ...union.unavailable.filter((item) => !unavailable.some((known) => known.lang === item.lang))],
-        args.locale,
-      );
-    } catch (error) {
-      if (!(error instanceof SkillError)) {
-        throw error;
-      }
-
-      // If the wider comparison fails, the report falls back to the requested languages.
-      reportLangs = langs;
-    }
-  }
+  const accumulated = await reportLanguages(qid, langs);
+  const target =
+    accumulated.length > langs.length
+      ? ((await widenReport(qid, accumulated, range, unavailable, args)) ?? { langs, artifact, missing })
+      : { langs: accumulated, artifact, missing };
+  const reportLangs = target.langs;
 
   const report = await runReport({
     ...named,
@@ -394,14 +416,14 @@ export async function runResearch(args: ResearchArgs): Promise<ResearchOutput> {
     from: range.from,
     to: range.to,
     locale: args.locale,
-    artifact: reportArtifact,
+    artifact: target.artifact,
     noCache: args.noCache,
-    unavailable: reportMissing,
+    unavailable: target.missing,
   });
   await saveReportLanguages(qid, reportLangs);
 
   // The answer is built from the requested languages' artifact, not from the wider report one.
-  const stored = JSON.parse(await readFile(artifact, 'utf8')) as Parameters<typeof toReportInput>[0];
+  const stored = JSON.parse(await readFile(artifact, 'utf8')) as StoredArtifact;
   const input = toReportInput(stored, langs, args.locale, artifact, label);
   const answer = render(headline(input), args.locale);
   const allCaveats = selectCaveats(input).map((caveat) => render(caveat, args.locale));

@@ -1,8 +1,9 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { analyzeLanguage } from '../src/commands/analyze.js';
+import { analyzeLanguage, runAnalyze } from '../src/commands/analyze.js';
+import type { TrendFit, TrendPercent } from '../src/lib/stats.js';
 import type { Message } from '../src/types.js';
 
 const DAYS = 728;
@@ -415,5 +416,119 @@ describe('a title in the middle of the history without data', () => {
     expect(result.series.missingDays).toBe(200);
     expect(result.confidence.components.continuity.score).toBeLessThan(1);
     expect(codes(result.confidence.caveats)).not.toContain('ZERO_VIEW_DAYS');
+  });
+});
+
+function roundTo(value: number, digits: number): number {
+  return Math.round(value * 10 ** digits) / 10 ** digits;
+}
+
+function expectedTrend(fit: TrendFit, trend: TrendPercent) {
+  return {
+    percentPerYear: trend.percentPerYear,
+    ci95: trend.ci95,
+    direction: trend.direction,
+    slopePerWeek: roundTo(fit.slope, 6),
+    intercept: roundTo(fit.intercept, 6),
+    ci95Slope: [roundTo(fit.ci95[0], 6), roundTo(fit.ci95[1], 6)],
+    baseline: roundTo(trend.baseline, 3),
+    baselineSource: trend.baselineSource,
+  };
+}
+
+describe('runAnalyze', () => {
+  it('prints rounded trends, level and outliers and stores the recent window start in the artifact', async () => {
+    const shape = (index: number) => (index % 97 === 50 ? 20000 : 2000 + (600 * index) / 365);
+    vi.stubGlobal('fetch', router(shape, () => 2_000_000_000));
+
+    const result = await runAnalyze({ qid: 'Q1', lang: 'en', from: START, to: LAST_DAY, noCache: true, out: null, locale: null });
+    const analysis = await analyzeLanguage('Q1', 'en', 'Topic', START, LAST_DAY, true);
+
+    expect(Object.keys(result)).toEqual([
+      'ok',
+      'command',
+      'qid',
+      'lang',
+      'project',
+      'title',
+      'unit',
+      'range',
+      'granularity',
+      'n_effective',
+      'primary',
+      'absoluteTrend',
+      'relativeTrend',
+      'recentTrend',
+      'yoy',
+      'level',
+      'seasonality',
+      'outliers',
+      'confidence',
+      'caveats',
+      'file',
+    ]);
+    expect(result.absoluteTrend).toEqual(expectedTrend(analysis.absoluteFit, analysis.absoluteTrend));
+    expect(result.relativeTrend).toEqual(expectedTrend(analysis.fit, analysis.relativeTrend as TrendPercent));
+    expect(analysis.recentFit).not.toBeNull();
+    expect(result.recentTrend).toEqual({
+      ...expectedTrend(analysis.recentFit as TrendFit, analysis.recentTrend as TrendPercent),
+      weeks: analysis.recentWeeks,
+      from: analysis.recentFrom ?? START,
+    });
+    expect(Object.keys(result.recentTrend ?? {})).not.toContain('startWeek');
+    expect(result.level).toEqual({
+      median: roundTo(analysis.level.median, 2),
+      p10: roundTo(analysis.level.p10, 2),
+      p90: roundTo(analysis.level.p90, 2),
+      cv: roundTo(analysis.level.cv, 2),
+      medianRawViews: Math.round(analysis.rawLevel.median),
+    });
+    expect(result.yoy).toEqual({
+      changePercent: analysis.yoy.changePercent,
+      current: analysis.yoy.current === null ? null : roundTo(analysis.yoy.current, 2),
+      previous: analysis.yoy.previous === null ? null : roundTo(analysis.yoy.previous, 2),
+      reason: analysis.yoy.reason,
+    });
+    expect(analysis.outlierIndices.length).toBeGreaterThan(0);
+    expect(result.outliers).toEqual({
+      excluded: analysis.outlierIndices.length,
+      share: roundTo(analysis.outlierIndices.length / analysis.days, 4),
+      dates: analysis.outlierDates.slice(0, 5),
+    });
+    expect(result.file).toBe(join(dir, 'output', 'analyze-Q1-en.json'));
+
+    const stored = JSON.parse(await readFile(result.file, 'utf8')) as Record<string, unknown>;
+
+    expect(stored['absoluteTrend']).toEqual(result.absoluteTrend);
+    expect(stored['relativeTrend']).toEqual(result.relativeTrend);
+    expect(stored['recentTrend']).toEqual({
+      ...expectedTrend(analysis.recentFit as TrendFit, analysis.recentTrend as TrendPercent),
+      weeks: analysis.recentWeeks,
+      from: analysis.recentFrom,
+      startWeek: analysis.weekly.weeks - analysis.recentWeeks,
+    });
+    expect(Object.keys(stored['recentTrend'] as object)).toEqual([
+      'percentPerYear',
+      'ci95',
+      'direction',
+      'slopePerWeek',
+      'intercept',
+      'ci95Slope',
+      'baseline',
+      'baselineSource',
+      'weeks',
+      'from',
+      'startWeek',
+    ]);
+  });
+
+  it('rejects a malformed qid before any request', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      runAnalyze({ qid: 'X1', lang: 'en', from: START, to: LAST_DAY, noCache: true, out: null, locale: null }),
+    ).rejects.toMatchObject({ code: 'InvalidInput', message: '--qid "X1" is not a Wikidata item id' });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

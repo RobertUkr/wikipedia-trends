@@ -1,8 +1,9 @@
-import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { outputDir } from '../lib/cache.js';
+import { outputDir, writeArtifact } from '../lib/cache.js';
 import { assessConfidence } from '../lib/confidence.js';
 import type { ConfidenceReport } from '../lib/confidence.js';
+import { DAY_MS, formatDay } from '../lib/dates.js';
+import { round } from '../lib/math.js';
 import { renderAll } from '../lib/messages.js';
 import type { Locale } from '../lib/messages.js';
 import { aggregateWeekly, enumerateDates, interpolate, mergeSeries, normalizeSeries } from '../lib/normalize.js';
@@ -12,6 +13,7 @@ import {
   detectOutliers,
   median,
   seasonality,
+  spansZero,
   summarize,
   theilSen,
   toPoints,
@@ -20,7 +22,7 @@ import {
 } from '../lib/stats.js';
 import type { Direction, SeasonalityResult, Summary, TrendFit, TrendPercent, YoyResult } from '../lib/stats.js';
 import type { ReversalInput } from '../lib/confidence.js';
-import { getSitelinks } from '../lib/wikidata.js';
+import { assertQidArg, getSitelinks } from '../lib/wikidata.js';
 import { getMovesFrom, getRedirectsTo, normalizeProject } from '../lib/wikimedia.js';
 import { parseSitelinkEvent, titleWindows } from '../lib/history.js';
 import type { SitelinkEvent } from '../lib/history.js';
@@ -54,20 +56,16 @@ export interface TrendReport {
   baselineSource: string;
 }
 
-function spansZero(ci: [number, number]): boolean {
-  return ci[0] <= 0 && ci[1] >= 0;
-}
-
 /** Rounds a Theil-Sen fit and its %/year trend into a TrendReport. */
 export function trendReport(fit: TrendFit, trend: TrendPercent): TrendReport {
   return {
     percentPerYear: trend.percentPerYear,
     ci95: trend.ci95,
     direction: trend.direction,
-    slopePerWeek: Math.round(fit.slope * 1e6) / 1e6,
-    intercept: Math.round(fit.intercept * 1e6) / 1e6,
-    ci95Slope: [Math.round(fit.ci95[0] * 1e6) / 1e6, Math.round(fit.ci95[1] * 1e6) / 1e6],
-    baseline: Math.round(trend.baseline * 1000) / 1000,
+    slopePerWeek: round(fit.slope, 6),
+    intercept: round(fit.intercept, 6),
+    ci95Slope: [round(fit.ci95[0], 6), round(fit.ci95[1], 6)],
+    baseline: round(trend.baseline, 3),
     baselineSource: trend.baselineSource,
   };
 }
@@ -141,18 +139,9 @@ export interface AnalyzeOutput {
   file: string;
 }
 
-/** Trend, confidence and caveats for one edition's article, following its renames within the range. */
-export async function analyzeLanguage(
-  qid: string,
-  lang: Lang,
-  title: string,
-  from: string,
-  to: string,
-  noCache: boolean,
-): Promise<LanguageAnalysis> {
-  const project = normalizeProject(lang);
+// Wikidata sitelink history tells which title the article had on which day.
+async function titleEvents(qid: string, project: string, lang: Lang, from: string, noCache: boolean): Promise<SitelinkEvent[]> {
   const site = `${lang.replace(/-/g, '_')}wiki`;
-  // Wikidata sitelink history tells which title the article had on which day.
   const history = await loadRevisionComments(qid, from, noCache).catch(() => [] as RevisionComment[]);
   const events = history
     .map((revision) => parseSitelinkEvent(revision.comment, revision.timestamp, site))
@@ -169,7 +158,7 @@ export async function analyzeLanguage(
     const seen = [...new Set([...events.map((event) => event.title), ...redirects].filter((value): value is string => !!value))];
 
     // The sitelink may be updated up to MAX_RENAME_LAG_DAYS after the actual move.
-    const earliest = new Date(renamedAt - MAX_RENAME_LAG_DAYS * 86400000).toISOString().slice(0, 10);
+    const earliest = formatDay(renamedAt - MAX_RENAME_LAG_DAYS * DAY_MS);
 
     // A candidate is confirmed only by a logged move to the new title; the switch is then dated to the move itself.
     for (const candidate of seen.filter((value) => value !== firstSet.title).slice(0, MAX_MOVE_LOOKUPS)) {
@@ -186,7 +175,18 @@ export async function analyzeLanguage(
     }
   }
 
-  // Each title is fetched only for the days it was the title of this article.
+  return events;
+}
+
+// Each title is fetched only for the days it was the title of this article.
+async function loadTitleSeries(
+  project: string,
+  title: string,
+  events: SitelinkEvent[],
+  from: string,
+  to: string,
+  noCache: boolean,
+): Promise<{ merged: DailyPoint[]; unknownDays: Set<string>; formerTitles: string[] }> {
   const windows = titleWindows(events, title, from, to);
   const parts: DailyPoint[][] = [];
   const unknownDays = new Set<string>();
@@ -212,7 +212,21 @@ export async function analyzeLanguage(
     throw new ArticleNotFound(project, title, from, to);
   }
 
-  const formerTitles = [...new Set(windows.map((window) => window.title))];
+  return { merged, unknownDays, formerTitles: [...new Set(windows.map((window) => window.title))] };
+}
+
+/** Trend, confidence and caveats for one edition's article, following its renames within the range. */
+export async function analyzeLanguage(
+  qid: string,
+  lang: Lang,
+  title: string,
+  from: string,
+  to: string,
+  noCache: boolean,
+): Promise<LanguageAnalysis> {
+  const project = normalizeProject(lang);
+  const events = await titleEvents(qid, project, lang, from, noCache);
+  const { merged, unknownDays, formerTitles } = await loadTitleSeries(project, title, events, from, to, noCache);
 
   let totalsPoints: Array<{ date: string; views: number }> = [];
   let totalsAvailable = true;
@@ -224,11 +238,10 @@ export async function analyzeLanguage(
     totalsAvailable = false;
   }
 
-  const edgeGap = (value: NormalizedSeries) => Math.max(value.leadingGapDays, value.trailingGapDays);
   const series = normalizeSeries(merged, totalsPoints, from, to, unknownDays);
 
   // A long gap at an edge usually means an untraced rename, a late creation or a merge; a trend on it would mislead.
-  if (edgeGap(series) > MAX_EDGE_GAP_DAYS) {
+  if (Math.max(series.leadingGapDays, series.trailingGapDays) > MAX_EDGE_GAP_DAYS) {
     const first = series.dates[series.leadingGapDays] ?? to;
     const last = series.dates[series.dates.length - 1 - series.trailingGapDays] ?? from;
 
@@ -285,21 +298,17 @@ export async function analyzeLanguage(
   const recentValues = primaryWeekly.values.slice(recentStart);
   const recentFit = recentValues.length >= MIN_RECENT_WEEKS ? theilSen(toPoints(recentValues)) : null;
   const recentTrend = recentFit ? trendPercentPerYear(recentValues, WEEKS_PER_YEAR) : null;
+  const recentPercent = recentTrend?.percentPerYear ?? null;
 
   // A reversal counts only when both the whole-period and the recent interval exclude zero.
   const reversal =
     recentFit !== null &&
-    recentTrend?.percentPerYear !== null &&
-    recentTrend !== null &&
+    recentPercent !== null &&
     trend.percentPerYear !== null &&
-    Math.sign(trend.percentPerYear) !== Math.sign(recentTrend.percentPerYear ?? 0) &&
+    Math.sign(trend.percentPerYear) !== Math.sign(recentPercent) &&
     !spansZero(fit.ci95) &&
     !spansZero(recentFit.ci95)
-      ? {
-          overallPercent: trend.percentPerYear,
-          recentPercent: recentTrend.percentPerYear ?? 0,
-          weeks: recentValues.length,
-        }
+      ? { overallPercent: trend.percentPerYear, recentPercent, weeks: recentValues.length }
       : null;
 
   const season = seasonality(repaired);
@@ -360,11 +369,39 @@ export async function analyzeLanguage(
   };
 }
 
+/** Recent trend as stored in the artifacts: the fit over the last weeks, where they start and at which week index. */
+export type RecentTrendReport = TrendReport & { weeks: number; from: string | null; startWeek: number };
+
+/** Rounded absolute, relative and recent trends of one analysis, as the analyze and compare artifacts store them. */
+export function trendReports(analysis: LanguageAnalysis): {
+  absoluteTrend: TrendReport;
+  relativeTrend: TrendReport | null;
+  recentTrend: RecentTrendReport | null;
+} {
+  return {
+    absoluteTrend: trendReport(analysis.absoluteFit, analysis.absoluteTrend),
+    relativeTrend: analysis.relativeTrend ? trendReport(analysis.fit, analysis.relativeTrend) : null,
+    recentTrend:
+      analysis.recentFit && analysis.recentTrend
+        ? {
+            ...trendReport(analysis.recentFit, analysis.recentTrend),
+            weeks: analysis.recentWeeks,
+            from: analysis.recentFrom,
+            startWeek: analysis.weekly.weeks - analysis.recentWeeks,
+          }
+        : null,
+  };
+}
+
+function stdoutRecentTrend(recent: RecentTrendReport, fallbackFrom: string): TrendReport & { weeks: number; from: string } {
+  const { startWeek: _startWeek, from, ...rest } = recent;
+
+  return { ...rest, from: from ?? fallbackFrom };
+}
+
 /** analyze command: one edition's trend and confidence, with the full analysis saved as an artifact for report. */
 export async function runAnalyze(args: AnalyzeArgs): Promise<AnalyzeOutput> {
-  if (!/^Q\d+$/.test(args.qid)) {
-    throw new SkillError('InvalidInput', `--qid "${args.qid}" is not a Wikidata item id`, { qid: args.qid });
-  }
+  assertQidArg(args.qid);
 
   const titles = await getSitelinks(args.qid);
   const title = titles[args.lang];
@@ -380,68 +417,49 @@ export async function runAnalyze(args: AnalyzeArgs): Promise<AnalyzeOutput> {
 
   const analysis = await analyzeLanguage(args.qid, args.lang, title, args.from, args.to, args.noCache);
 
-  const dir = outputDir();
-  await mkdir(dir, { recursive: true });
-  const file = args.out ?? join(dir, `analyze-${args.qid}-${args.lang}.json`);
+  const file = args.out ?? join(outputDir(), `analyze-${args.qid}-${args.lang}.json`);
+  const trends = trendReports(analysis);
 
-  await writeFile(
-    file,
-    JSON.stringify(
-      {
-        schema: ARTIFACT_SCHEMA,
-        kind: 'analyze',
-        qid: args.qid,
-        lang: args.lang,
-        project: analysis.project,
-        title: analysis.title,
-        from: args.from,
-        to: args.to,
-        days: analysis.days,
-        unit: analysis.unit,
-        analysedAt: new Date().toISOString(),
-        primary: analysis.primary,
-        absoluteTrend: trendReport(analysis.absoluteFit, analysis.absoluteTrend),
-        relativeTrend: analysis.relativeTrend ? trendReport(analysis.fit, analysis.relativeTrend) : null,
-        recentTrend:
-          analysis.recentFit && analysis.recentTrend
-            ? {
-                ...trendReport(analysis.recentFit, analysis.recentTrend),
-                weeks: analysis.recentWeeks,
-                from: analysis.recentFrom,
-                startWeek: analysis.weekly.weeks - analysis.recentWeeks,
-              }
-            : null,
-        reversal: analysis.reversal,
-        yoy: analysis.yoy,
-        level: analysis.level,
-        rawLevel: analysis.rawLevel,
-        granularity: 'weekly',
-        n_effective: analysis.weekly.weeks,
-        weeklyValues: analysis.weekly.values,
-        seasonality: {
-          available: analysis.season.available,
-          reason: analysis.season.reason,
-          detected: analysis.season.detected,
-          strength: analysis.season.strength,
-          cyclesAvailable: analysis.season.cyclesAvailable,
-          profile: analysis.season.available ? analysis.season.seasonal.slice(0, analysis.season.period) : [],
-        },
-        outliers: { indices: analysis.outlierIndices, dates: analysis.outlierDates },
-        confidence: analysis.confidence,
-        coverage: {
-          missingDays: analysis.series.missingDays,
-          zeroDays: analysis.series.zeroDays,
-          longestGapDays: analysis.series.longestGapDays,
-          totalsCoverage: analysis.series.totalsCoverage,
-        },
-        points: analysis.series.points,
-        deseasonalized: analysis.season.deseasonalized,
-      },
-      null,
-      2,
-    ),
-    'utf8',
-  );
+  await writeArtifact(file, {
+    schema: ARTIFACT_SCHEMA,
+    kind: 'analyze',
+    qid: args.qid,
+    lang: args.lang,
+    project: analysis.project,
+    title: analysis.title,
+    from: args.from,
+    to: args.to,
+    days: analysis.days,
+    unit: analysis.unit,
+    analysedAt: new Date().toISOString(),
+    primary: analysis.primary,
+    ...trends,
+    reversal: analysis.reversal,
+    yoy: analysis.yoy,
+    level: analysis.level,
+    rawLevel: analysis.rawLevel,
+    granularity: 'weekly',
+    n_effective: analysis.weekly.weeks,
+    weeklyValues: analysis.weekly.values,
+    seasonality: {
+      available: analysis.season.available,
+      reason: analysis.season.reason,
+      detected: analysis.season.detected,
+      strength: analysis.season.strength,
+      cyclesAvailable: analysis.season.cyclesAvailable,
+      profile: analysis.season.available ? analysis.season.seasonal.slice(0, analysis.season.period) : [],
+    },
+    outliers: { indices: analysis.outlierIndices, dates: analysis.outlierDates },
+    confidence: analysis.confidence,
+    coverage: {
+      missingDays: analysis.series.missingDays,
+      zeroDays: analysis.series.zeroDays,
+      longestGapDays: analysis.series.longestGapDays,
+      totalsCoverage: analysis.series.totalsCoverage,
+    },
+    points: analysis.series.points,
+    deseasonalized: analysis.season.deseasonalized,
+  });
 
   const components = analysis.confidence.components;
 
@@ -457,27 +475,20 @@ export async function runAnalyze(args: AnalyzeArgs): Promise<AnalyzeOutput> {
     granularity: 'weekly',
     n_effective: analysis.weekly.weeks,
     primary: analysis.primary,
-    absoluteTrend: trendReport(analysis.absoluteFit, analysis.absoluteTrend),
-    relativeTrend: analysis.relativeTrend ? trendReport(analysis.fit, analysis.relativeTrend) : null,
-    recentTrend:
-      analysis.recentFit && analysis.recentTrend
-        ? {
-            ...trendReport(analysis.recentFit, analysis.recentTrend),
-            weeks: analysis.recentWeeks,
-            from: analysis.recentFrom ?? args.from,
-          }
-        : null,
+    absoluteTrend: trends.absoluteTrend,
+    relativeTrend: trends.relativeTrend,
+    recentTrend: trends.recentTrend ? stdoutRecentTrend(trends.recentTrend, args.from) : null,
     yoy: {
       changePercent: analysis.yoy.changePercent,
-      current: analysis.yoy.current === null ? null : Math.round(analysis.yoy.current * 100) / 100,
-      previous: analysis.yoy.previous === null ? null : Math.round(analysis.yoy.previous * 100) / 100,
+      current: analysis.yoy.current === null ? null : round(analysis.yoy.current),
+      previous: analysis.yoy.previous === null ? null : round(analysis.yoy.previous),
       reason: analysis.yoy.reason,
     },
     level: {
-      median: Math.round(analysis.level.median * 100) / 100,
-      p10: Math.round(analysis.level.p10 * 100) / 100,
-      p90: Math.round(analysis.level.p90 * 100) / 100,
-      cv: Math.round(analysis.level.cv * 100) / 100,
+      median: round(analysis.level.median),
+      p10: round(analysis.level.p10),
+      p90: round(analysis.level.p90),
+      cv: round(analysis.level.cv),
       medianRawViews: Math.round(analysis.rawLevel.median),
     },
     seasonality: {
@@ -489,7 +500,7 @@ export async function runAnalyze(args: AnalyzeArgs): Promise<AnalyzeOutput> {
     },
     outliers: {
       excluded: analysis.outlierIndices.length,
-      share: Math.round((analysis.outlierIndices.length / analysis.days) * 10000) / 10000,
+      share: round(analysis.outlierIndices.length / analysis.days, 4),
       dates: analysis.outlierDates.slice(0, 5),
     },
     confidence: {

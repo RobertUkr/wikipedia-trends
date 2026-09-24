@@ -1,7 +1,12 @@
-import { describe, expect, it } from 'vitest';
-import { CRITERION, WEIGHTS, buildCompareCaveats, minMaxScale, rank } from '../src/commands/compare.js';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { CRITERION, WEIGHTS, buildCompareCaveats, minMaxScale, rank, runCompare } from '../src/commands/compare.js';
+import { analyzeLanguage } from '../src/commands/analyze.js';
 import type { LanguageAnalysis } from '../src/commands/analyze.js';
 import { trendDirection } from '../src/lib/stats.js';
+import type { TrendFit, TrendPercent } from '../src/lib/stats.js';
 import type { Message } from '../src/types.js';
 
 function codes(messages: Message[]): string[] {
@@ -148,5 +153,182 @@ describe('buildCompareCaveats', () => {
     );
 
     expect(codes(caveats)).toContain('MIXED_UNITS');
+  });
+});
+
+describe('runCompare', () => {
+  const DAYS = 728;
+  const START = '2024-01-01';
+  const DATES = Array.from({ length: DAYS }, (_, index) =>
+    new Date(Date.parse(`${START}T00:00:00Z`) + index * 86400000).toISOString().slice(0, 10),
+  );
+  const LAST_DAY = DATES[DAYS - 1] as string;
+  const SITELINKS = {
+    entities: {
+      Q1: {
+        sitelinks: {
+          enwiki: { site: 'enwiki', title: 'Topic' },
+          dewiki: { site: 'dewiki', title: 'Thema' },
+          frwiki: { site: 'frwiki', title: 'Sujet' },
+        },
+      },
+    },
+  };
+
+  function json(body: unknown, status = 200): Response {
+    return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  }
+
+  function series(shape: (index: number) => number, from = 0) {
+    return {
+      items: DATES.map((date, index) => ({ timestamp: `${date.replace(/-/g, '')}00`, views: Math.max(1, Math.round(shape(index))) })).slice(from),
+    };
+  }
+
+  function router() {
+    return vi.fn().mockImplementation((url: string) => {
+      const target = String(url);
+
+      if (target.includes('props=sitelinks')) {
+        return Promise.resolve(json(SITELINKS));
+      }
+
+      if (target.includes('prop=revisions')) {
+        return Promise.resolve(json({ query: { pages: [{ revisions: [] }] } }));
+      }
+
+      if (target.includes('per-article') && target.includes('fr.wikipedia')) {
+        return Promise.resolve(json(series(() => 50, DAYS - 120)));
+      }
+
+      if (target.includes('per-article') && target.includes('de.wikipedia')) {
+        return Promise.resolve(json(series((index) => 3000 - (500 * index) / 365)));
+      }
+
+      if (target.includes('per-article')) {
+        return Promise.resolve(json(series((index) => (index % 97 === 50 ? 20000 : 2000 + (600 * index) / 365))));
+      }
+
+      if (target.includes('aggregate')) {
+        return Promise.resolve(json(series(() => 2_000_000_000)));
+      }
+
+      throw new Error(`unexpected request: ${target}`);
+    });
+  }
+
+  function roundTo(value: number, digits: number): number {
+    return Math.round(value * 10 ** digits) / 10 ** digits;
+  }
+
+  function expectedTrend(fit: TrendFit, trend: TrendPercent) {
+    return {
+      percentPerYear: trend.percentPerYear,
+      ci95: trend.ci95,
+      direction: trend.direction,
+      slopePerWeek: roundTo(fit.slope, 6),
+      intercept: roundTo(fit.intercept, 6),
+      ci95Slope: [roundTo(fit.ci95[0], 6), roundTo(fit.ci95[1], 6)],
+      baseline: roundTo(trend.baseline, 3),
+      baselineSource: trend.baselineSource,
+    };
+  }
+
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'wt-compare-'));
+    process.env['WIKIPEDIA_TRENDS_CACHE_DIR'] = join(dir, 'cache');
+    process.env['WIKIPEDIA_TRENDS_OUTPUT_DIR'] = join(dir, 'output');
+  });
+
+  afterEach(async () => {
+    delete process.env['WIKIPEDIA_TRENDS_CACHE_DIR'];
+    delete process.env['WIKIPEDIA_TRENDS_OUTPUT_DIR'];
+    vi.unstubAllGlobals();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('ranks the editions with data, lists a short history as unavailable and stores rounded trends', async () => {
+    vi.stubGlobal('fetch', router());
+
+    const result = await runCompare({ qid: 'Q1', langs: ['en', 'de', 'fr'], from: START, to: LAST_DAY, noCache: true, out: null, locale: null });
+    const analyses = {
+      en: await analyzeLanguage('Q1', 'en', 'Topic', START, LAST_DAY, true),
+      de: await analyzeLanguage('Q1', 'de', 'Thema', START, LAST_DAY, true),
+    };
+
+    expect(Object.keys(result)).toEqual([
+      'ok',
+      'command',
+      'qid',
+      'range',
+      'granularity',
+      'n_effective',
+      'unit',
+      'comparable',
+      'criterion',
+      'ranking',
+      'unavailable',
+      'caveats',
+      'file',
+    ]);
+    expect(result.range).toEqual({ from: START, to: LAST_DAY, days: analyses.en.days });
+    expect(result.ranking.map((item) => item.lang).sort()).toEqual(['de', 'en']);
+
+    for (const row of result.ranking) {
+      const analysis = analyses[row.lang as 'en' | 'de'];
+
+      expect(row.medianPerMillion).toBe(roundTo(analysis.level.median, 2));
+      expect(row.perspective).toBe(roundTo(row.perspective, 3));
+      expect(row.recentPercentPerYear).toBe(analysis.recentTrend?.percentPerYear ?? null);
+    }
+
+    expect(result.unavailable).toEqual([
+      {
+        lang: 'fr',
+        project: 'fr.wikipedia.org',
+        status: 'short_history',
+        title: 'Sujet',
+        reason: { code: 'SHORT_HISTORY', params: { title: 'Sujet', first: DATES[DAYS - 120], last: LAST_DAY } },
+        requiresConfirmation: false,
+        searchQuery: null,
+        searchHits: 0,
+        alternatives: [],
+      },
+    ]);
+    expect(result.file).toBe(join(dir, 'output', 'compare-Q1.json'));
+
+    const stored = JSON.parse(await readFile(result.file, 'utf8')) as {
+      unavailable: unknown;
+      languages: Array<Record<string, unknown> & { lang: 'en' | 'de' }>;
+    };
+
+    expect(stored.unavailable).toEqual(result.unavailable);
+    expect(stored.languages.map((item) => item.lang)).toEqual(['en', 'de']);
+
+    for (const item of stored.languages) {
+      const analysis = analyses[item.lang];
+
+      expect(item['trend']).toEqual(expectedTrend(analysis.fit, analysis.trend));
+      expect(item['absoluteTrend']).toEqual(expectedTrend(analysis.absoluteFit, analysis.absoluteTrend));
+      expect(item['relativeTrend']).toEqual(expectedTrend(analysis.fit, analysis.relativeTrend as TrendPercent));
+      expect(item['recentTrend']).toEqual({
+        ...expectedTrend(analysis.recentFit as TrendFit, analysis.recentTrend as TrendPercent),
+        weeks: analysis.recentWeeks,
+        from: analysis.recentFrom,
+        startWeek: analysis.weekly.weeks - analysis.recentWeeks,
+      });
+    }
+  });
+
+  it('rejects a malformed qid before any request', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      runCompare({ qid: 'q1', langs: ['en', 'de'], from: START, to: LAST_DAY, noCache: true, out: null, locale: null }),
+    ).rejects.toMatchObject({ code: 'InvalidInput', message: '--qid "q1" is not a Wikidata item id' });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

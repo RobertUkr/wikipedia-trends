@@ -1,3 +1,5 @@
+import { addDays } from './dates.js';
+
 /** A change of an article's sitelink for one wiki, parsed from a Wikidata revision comment. */
 export interface SitelinkEvent {
   at: string;
@@ -14,15 +16,9 @@ export interface TitleWindow {
   to: string;
 }
 
-const DAY_MS = 24 * 60 * 60 * 1000;
-
 // Site keys are embedded into regexes below.
 function escape(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function dayBefore(date: string): string {
-  return new Date(Date.parse(`${date}T00:00:00Z`) - DAY_MS).toISOString().slice(0, 10);
 }
 
 /** Parses a Wikidata edit summary into a sitelink set/remove event for `site`; null if it is unrelated. */
@@ -102,7 +98,8 @@ export function titleWindows(events: SitelinkEvent[], current: string, from: str
   segments.forEach((segment, index) => {
     const next = segments[index + 1];
     const start = segment.from > from ? segment.from : from;
-    const end = next ? (dayBefore(next.from) < to ? dayBefore(next.from) : to) : to;
+    const lastDay = next ? addDays(next.from, -1) : to;
+    const end = lastDay < to ? lastDay : to;
 
     if (!segment.title || start > end) {
       return;
@@ -111,7 +108,7 @@ export function titleWindows(events: SitelinkEvent[], current: string, from: str
     const previous = windows[windows.length - 1];
 
     // Adjacent segments with the same title (e.g. an edit that did not change it) merge into one window.
-    if (previous && previous.title === segment.title && previous.to === dayBefore(start)) {
+    if (previous && previous.title === segment.title && previous.to === addDays(start, -1)) {
       previous.to = end;
       return;
     }

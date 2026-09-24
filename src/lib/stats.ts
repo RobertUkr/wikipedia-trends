@@ -1,6 +1,7 @@
 import { SkillError } from '../types.js';
 import type { Message } from '../types.js';
 import { message } from './messages.js';
+import { clamp01, round } from './math.js';
 
 /** Modified z-score above which a day's residual counts as a spike (Iglewicz–Hoaglin 3.5). */
 export const MODIFIED_Z_THRESHOLD = 3.5;
@@ -81,7 +82,14 @@ export function quantile(values: number[], q: number): number {
     return 0;
   }
 
-  const sorted = [...values].sort((a, b) => a - b);
+  return interpolateSorted([...values].sort((a, b) => a - b), q);
+}
+
+function interpolateSorted(sorted: ArrayLike<number>, q: number): number {
+  if (sorted.length === 0) {
+    return 0;
+  }
+
   const position = (sorted.length - 1) * q;
   const lower = Math.floor(position);
   const upper = Math.ceil(position);
@@ -167,9 +175,9 @@ export function theilSen(input: Point[]): TrendFit {
     }
   }
 
-  // Typed-array sort is numeric, unlike the default Array#sort.
-  const used = slopes.subarray(0, count).slice().sort();
-  const slope = quantileSorted(used, 0.5);
+  // Typed-array sort is numeric, unlike the default Array#sort; sorting the local buffer in place is safe.
+  const used = slopes.subarray(0, count).sort();
+  const slope = interpolateSorted(used, 0.5);
   const intercept = median(points.map((point) => point.y - slope * point.x));
 
   // Variance of Kendall's S (no ties); the interval bounds are ranks of the sorted pairwise slopes (Sen 1968).
@@ -190,25 +198,6 @@ export function theilSen(input: Point[]): TrendFit {
 
 function clampIndex(index: number, length: number): number {
   return Math.min(Math.max(index, 0), Math.max(length - 1, 0));
-}
-
-function quantileSorted(sorted: Float64Array, q: number): number {
-  if (sorted.length === 0) {
-    return 0;
-  }
-
-  const position = (sorted.length - 1) * q;
-  const lower = Math.floor(position);
-  const upper = Math.ceil(position);
-  const low = sorted[lower] ?? 0;
-
-  if (lower === upper) {
-    return low;
-  }
-
-  const high = sorted[upper] ?? low;
-
-  return low + (high - low) * (position - lower);
 }
 
 /** Trend verdict derived from the 95% interval, not from the point estimate. */
@@ -290,17 +279,13 @@ export function trendPercentPerYear(values: number[], periodsPerYear: number = Y
   ];
 
   return {
-    percentPerYear: round1(compoundPercent(logFit.slope, periodsPerYear)),
-    ci95: [round1(exact[0]), round1(exact[1])],
+    percentPerYear: round(compoundPercent(logFit.slope, periodsPerYear), 1),
+    ci95: [round(exact[0], 1), round(exact[1], 1)],
     direction: trendDirection(exact),
     // Back-transforms the intercept to the original scale: the fitted level at the first point.
     baseline: Math.exp(logFit.intercept) - offset,
     baselineSource: 'intercept',
   };
-}
-
-function round1(value: number): number {
-  return Math.round(value * 10) / 10;
 }
 
 /** Indices of spike values by modified z-score (median and MAD), so news events do not become trends. */
@@ -349,7 +334,7 @@ export function movingMedian(values: number[], window: number): number[] {
 
 /** Yearly seasonal profile (moving-median trend, mean detrended value per day of year) and its strength. */
 export function seasonality(values: number[], period: number = YEAR_DAYS): SeasonalityResult {
-  const cyclesAvailable = Math.round((values.length / period) * 100) / 100;
+  const cyclesAvailable = round(values.length / period, 2);
 
   if (cyclesAvailable < MIN_SEASONAL_CYCLES) {
     return {
@@ -380,21 +365,20 @@ export function seasonality(values: number[], period: number = YEAR_DAYS): Seaso
   const seasonal = values.map((_, index) => profile[index % period] ?? 0);
   const deseasonalized = values.map((value, index) => value - (seasonal[index] ?? 0));
 
-  const residualBefore = values.map((value, index) => value - (trend[index] ?? 0));
   const residualAfter = deseasonalized.map((value, index) => value - (trend[index] ?? 0));
-  const varBefore = stdev(residualBefore) ** 2;
+  const varBefore = stdev(detrended) ** 2;
   const varAfter = stdev(residualAfter) ** 2;
   const rawStrength = varBefore === 0 ? 0 : 1 - varAfter / varBefore;
   // A profile with one free value per period removes about period/n of the variance even from noise; discount that.
   const byChance = Math.min(0.99, period / values.length);
-  const strength = Math.max(0, Math.min(1, (rawStrength - byChance) / (1 - byChance)));
+  const strength = clamp01((rawStrength - byChance) / (1 - byChance));
 
   return {
     available: true,
     reason: null,
     period,
     cyclesAvailable,
-    strength: Math.round(strength * 1000) / 1000,
+    strength: round(strength, 3),
     seasonal,
     deseasonalized,
     detected: strength >= 0.3,

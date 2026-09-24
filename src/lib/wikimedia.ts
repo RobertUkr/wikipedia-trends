@@ -34,7 +34,7 @@ export const DEFAULT_CONTACT = 'https://github.com/RobertUkr';
 export function contact(): { value: string; source: 'env' | 'default' } {
   const configured = process.env['WIKIMEDIA_CONTACT']?.trim();
 
-  if (configured && configured.length > 0) {
+  if (configured) {
     return { value: configured, source: 'env' };
   }
 
@@ -189,9 +189,15 @@ export function stripMarkup(value: string): string {
     .trim();
 }
 
-/** MediaWiki full-text search URL over the articles (main namespace) of one edition. */
-export function articleSearchUrl(project: string, query: string, limit: number): string {
-  const params = new URLSearchParams({
+/** MediaWiki Action API URL on the host, with JSON format version 2 appended to the params. */
+export function actionApiUrl(host: string, params: Record<string, string>): string {
+  const query = new URLSearchParams({ ...params, format: 'json', formatversion: '2' });
+  return `https://${host}/w/api.php?${query.toString()}`;
+}
+
+// MediaWiki full-text search URL over the articles (main namespace) of one edition.
+function articleSearchUrl(project: string, query: string, limit: number): string {
+  return actionApiUrl(normalizeProject(project), {
     action: 'query',
     list: 'search',
     srsearch: query,
@@ -200,10 +206,7 @@ export function articleSearchUrl(project: string, query: string, limit: number):
     srprop: 'snippet',
     // The total match count is reported as mentions when no article matches.
     srinfo: 'totalhits',
-    format: 'json',
-    formatversion: '2',
   });
-  return `https://${normalizeProject(project)}/w/api.php?${params.toString()}`;
 }
 
 interface SearchApiResponse {
@@ -243,6 +246,11 @@ function encodeTitle(title: string): string {
   return encodeURIComponent(title.replace(/ /g, '_'));
 }
 
+/** Web URL of an article in an edition, e.g. https://uk.wikipedia.org/wiki/Київ. */
+export function articleUrl(project: string, title: string): string {
+  return `https://${normalizeProject(project)}/wiki/${encodeTitle(title)}`;
+}
+
 interface PerArticleResponse {
   items?: Array<{ timestamp?: string; views?: number }>;
 }
@@ -260,22 +268,22 @@ interface MoveLogResponse {
 
 /** Moves logged under a former title, used to confirm and date a rename traced from Wikidata. */
 export async function getMovesFrom(project: string, title: string, opts: RequestOptions = {}): Promise<PageMove[]> {
-  const params = new URLSearchParams({
+  const url = actionApiUrl(normalizeProject(project), {
     action: 'query',
     list: 'logevents',
     letype: 'move',
     letitle: title,
     leprop: 'title|details|timestamp',
     lelimit: '50',
-    format: 'json',
-    formatversion: '2',
   });
-  const payload = await requestJson<MoveLogResponse>(`https://${normalizeProject(project)}/w/api.php?${params.toString()}`, opts);
+  const payload = await requestJson<MoveLogResponse>(url, opts);
 
-  return (payload.query?.logevents ?? [])
+  return (payload.query?.logevents ?? []).flatMap((event) => {
+    const timestamp = event.timestamp;
+    const to = event.params?.target_title;
     // Entries without a timestamp or target cannot date a rename.
-    .filter((event) => event.timestamp && event.params?.target_title)
-    .map((event) => ({ date: (event.timestamp as string).slice(0, 10), from: event.title ?? title, to: event.params?.target_title as string }));
+    return timestamp && to ? [{ date: timestamp.slice(0, 10), from: event.title ?? title, to }] : [];
+  });
 }
 
 /** A redirect to an article and the timestamp of its latest revision. */
@@ -290,7 +298,7 @@ interface RedirectsResponse {
 
 /** Redirects to an article, used as candidate former titles when a rename is not named in Wikidata. */
 export async function getRedirectsTo(project: string, title: string, opts: RequestOptions = {}): Promise<PageRedirect[]> {
-  const params = new URLSearchParams({
+  const url = actionApiUrl(normalizeProject(project), {
     action: 'query',
     generator: 'redirects',
     titles: title,
@@ -300,14 +308,11 @@ export async function getRedirectsTo(project: string, title: string, opts: Reque
     prop: 'revisions',
     // The latest revision time lets the caller try redirects closest to the rename first.
     rvprop: 'timestamp',
-    format: 'json',
-    formatversion: '2',
   });
-  const payload = await requestJson<RedirectsResponse>(`https://${normalizeProject(project)}/w/api.php?${params.toString()}`, opts);
+  const payload = await requestJson<RedirectsResponse>(url, opts);
 
-  return (payload.query?.pages ?? [])
-    .filter((page) => page.title)
-    .map((page) => ({ title: page.title as string, lastEdited: page.revisions?.[0]?.timestamp ?? '' }));
+  return (payload.query?.pages ?? []).flatMap((page) =>
+    page.title ? [{ title: page.title, lastEdited: page.revisions?.[0]?.timestamp ?? '' }] : []);
 }
 
 /** Pageviews API URL for one article's daily user views over a date range. */
@@ -339,12 +344,28 @@ export function projectTotalsUrl(project: string, start: string, end: string): s
   ].join('/');
 }
 
-function toPoints(items: Array<{ timestamp?: string; views?: number }> | undefined): DailyPoint[] {
+function toPoints(items: PerArticleResponse['items']): DailyPoint[] {
   return (items ?? [])
     .filter((item): item is { timestamp: string; views: number } =>
       typeof item.timestamp === 'string' && typeof item.views === 'number')
     .map((item) => ({ date: fromTimestamp(item.timestamp), views: item.views }))
     .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+// Fetches a Pageviews series; the API answers 404 when it has no data for the range, mapped to notFound().
+async function fetchPoints(url: string, opts: RequestOptions, notFound: () => SkillError): Promise<DailyPoint[]> {
+  let payload: PerArticleResponse;
+  try {
+    payload = await requestJson<PerArticleResponse>(url, opts);
+  } catch (error) {
+    if (error instanceof HttpError && error.status === 404) {
+      throw notFound();
+    }
+
+    throw error;
+  }
+
+  return toPoints(payload.items);
 }
 
 /** Daily user pageviews of one article; throws ArticleNotFound when the API has no data for the range. */
@@ -356,23 +377,12 @@ export async function getArticleViews(
   opts: RequestOptions = {},
 ): Promise<ArticleViews> {
   const normalized = normalizeProject(project);
-  const url = articleViewsUrl(project, title, start, end);
+  const notFound = () => new ArticleNotFound(normalized, title, start, end);
+  const points = await fetchPoints(articleViewsUrl(project, title, start, end), opts, notFound);
 
-  let payload: PerArticleResponse;
-  try {
-    payload = await requestJson<PerArticleResponse>(url, opts);
-  } catch (error) {
-    // The Pageviews API answers 404 when it has no data for the title in the range.
-    if (error instanceof HttpError && error.status === 404) {
-      throw new ArticleNotFound(normalized, title, start, end);
-    }
-    throw error;
-  }
-
-  const points = toPoints(payload.items);
   // An empty series is treated the same as a 404.
   if (points.length === 0) {
-    throw new ArticleNotFound(normalized, title, start, end);
+    throw notFound();
   }
 
   return {
@@ -393,27 +403,18 @@ export async function getProjectTotals(
   opts: RequestOptions = {},
 ): Promise<ProjectTotals> {
   const normalized = normalizeProject(project);
-  const url = projectTotalsUrl(project, start, end);
-
-  let payload: PerArticleResponse;
-  try {
-    payload = await requestJson<PerArticleResponse>(url, opts);
-  } catch (error) {
-    if (error instanceof HttpError && error.status === 404) {
-      throw new SkillError('ArticleNotFound', `No aggregate pageviews for ${normalized} between ${start} and ${end}`, {
-        project: normalized,
-        start,
-        end,
-      });
-    }
-    throw error;
-  }
+  const points = await fetchPoints(projectTotalsUrl(project, start, end), opts, () =>
+    new SkillError('ArticleNotFound', `No aggregate pageviews for ${normalized} between ${start} and ${end}`, {
+      project: normalized,
+      start,
+      end,
+    }));
 
   return {
     project: normalized,
     access: ACCESS,
     agent: AGENT,
     granularity: GRANULARITY,
-    points: toPoints(payload.items),
+    points,
   };
 }

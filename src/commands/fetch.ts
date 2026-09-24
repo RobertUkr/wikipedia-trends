@@ -1,17 +1,14 @@
-import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { cacheKey, outputDir, readCache, writeCache } from '../lib/cache.js';
+import { cacheKey, outputDir, readCache, writeArtifact, writeCache } from '../lib/cache.js';
+import { DAY_MS, formatDay } from '../lib/dates.js';
 import { message } from '../lib/messages.js';
 import { enumerateDates } from '../lib/normalize.js';
-import { getRevisionComments, getSitelinks, probeLanguages } from '../lib/wikidata.js';
+import { assertQidArg, getRevisionComments, getSitelinks, probeLanguages } from '../lib/wikidata.js';
 import type { RevisionComment } from '../lib/wikidata.js';
 import { getArticleViews, getProjectTotals, normalizeProject, toApiDate } from '../lib/wikimedia.js';
 import { ACCESS, AGENT, ArticleNotFound, GRANULARITY, SkillError } from '../types.js';
 import type { ArticleViews, DailyPoint, Lang, LanguageAvailability, ProjectTotals } from '../types.js';
-
-const DAY_MS = 24 * 60 * 60 * 1000;
-
-export { enumerateDates };
+import { failedLanguage, fallbackQuery } from './unavailable.js';
 
 /** Arguments of the fetch command. */
 export interface FetchArgs {
@@ -60,8 +57,6 @@ export interface FetchOutput {
   unavailable: LanguageAvailability[];
 }
 
-
-
 /** Counts missing days and the longest gap of a raw series against the requested range. */
 export function summarizeSeries(points: DailyPoint[], from: string, to: string): SeriesSummary {
   const expected = enumerateDates(from, to);
@@ -77,6 +72,7 @@ export function summarizeSeries(points: DailyPoint[], from: string, to: string):
       currentGap = 0;
       continue;
     }
+
     missingDays += 1;
     currentGap += 1;
     longestGapDays = Math.max(longestGapDays, currentGap);
@@ -98,13 +94,31 @@ export function summarizeSeries(points: DailyPoint[], from: string, to: string):
 function validateRange(from: string, to: string): void {
   toApiDate(from);
   toApiDate(to);
+
   if (from > to) {
     throw new SkillError('InvalidInput', `--from (${from}) must not be after --to (${to})`, { from, to });
   }
-  const yesterday = new Date(Date.now() - DAY_MS).toISOString().slice(0, 10);
+
+  const yesterday = formatDay(Date.now() - DAY_MS);
+
   if (to > yesterday) {
     throw new SkillError('InvalidInput', `--to (${to}) is beyond the last day with data (${yesterday})`, { to });
   }
+}
+
+async function cachedOrLoad<T>(key: string, noCache: boolean, load: () => Promise<T>): Promise<{ value: T; cached: boolean }> {
+  if (!noCache) {
+    const cached = await readCache<T>(key);
+
+    if (cached) {
+      return { value: cached, cached: true };
+    }
+  }
+
+  const value = await load();
+  await writeCache(key, value);
+
+  return { value, cached: false };
 }
 
 /** Daily views of one article, from the 24-hour cache unless noCache is set. */
@@ -116,17 +130,9 @@ export async function loadSeries(
   noCache: boolean,
 ): Promise<{ views: ArticleViews; cached: boolean }> {
   const key = cacheKey({ project, title, start: from, end: to, access: ACCESS, agent: AGENT });
+  const { value, cached } = await cachedOrLoad(key, noCache, () => getArticleViews(project, title, from, to));
 
-  if (!noCache) {
-    const cached = await readCache<ArticleViews>(key);
-    if (cached) {
-      return { views: cached, cached: true };
-    }
-  }
-
-  const views = await getArticleViews(project, title, from, to);
-  await writeCache(key, views);
-  return { views, cached: false };
+  return { views: value, cached };
 }
 
 /** Daily total views of a whole edition, the denominator of views per million. */
@@ -137,47 +143,26 @@ export async function loadTotals(
   noCache: boolean,
 ): Promise<{ totals: ProjectTotals; cached: boolean }> {
   const key = cacheKey({ kind: 'totals', project, start: from, end: to, access: ACCESS, agent: AGENT });
+  const { value, cached } = await cachedOrLoad(key, noCache, () => getProjectTotals(project, from, to));
 
-  if (!noCache) {
-    const cached = await readCache<ProjectTotals>(key);
-
-    if (cached) {
-      return { totals: cached, cached: true };
-    }
-  }
-
-  const totals = await getProjectTotals(project, from, to);
-  await writeCache(key, totals);
-
-  return { totals, cached: false };
+  return { totals: value, cached };
 }
 
 /** Wikidata revision comments of the item since a date, used to trace article renames. */
 export async function loadRevisionComments(qid: string, since: string, noCache: boolean): Promise<RevisionComment[]> {
   const key = cacheKey({ kind: 'sitelink-history', qid, since });
 
-  if (!noCache) {
-    const cached = await readCache<RevisionComment[]>(key);
-
-    if (cached) {
-      return cached;
-    }
-  }
-
-  const comments = await getRevisionComments(qid, since);
-  await writeCache(key, comments);
-
-  return comments;
+  return (await cachedOrLoad(key, noCache, () => getRevisionComments(qid, since))).value;
 }
 
 /** fetch command: daily views per edition written to a file, with unavailable editions and their reasons. */
 export async function runFetch(args: FetchArgs): Promise<FetchOutput> {
-  if (!/^Q\d+$/.test(args.qid)) {
-    throw new SkillError('InvalidInput', `--qid "${args.qid}" is not a Wikidata item id`, { qid: args.qid });
-  }
+  assertQidArg(args.qid);
+
   if (args.langs.length === 0) {
     throw new SkillError('InvalidInput', '--langs is required, e.g. --langs pl,cs');
   }
+
   validateRange(args.from, args.to);
 
   const titles = await getSitelinks(args.qid);
@@ -185,19 +170,17 @@ export async function runFetch(args: FetchArgs): Promise<FetchOutput> {
   const stored: Array<{ lang: Lang; project: string; title: string; summary: SeriesSummary; points: DailyPoint[] }> = [];
 
   const missing = args.langs.filter((lang) => !titles[lang]);
-  const unavailable: LanguageAvailability[] = await probeLanguages(
-    args.qid,
-    missing,
-    titles['en'] ?? Object.values(titles)[0] ?? args.qid,
-  );
+  const unavailable: LanguageAvailability[] = await probeLanguages(args.qid, missing, fallbackQuery(titles, args.qid));
 
   for (const lang of args.langs) {
     const title = titles[lang];
+
     if (!title) {
       continue;
     }
 
     const project = normalizeProject(lang);
+
     try {
       const { views, cached } = await loadSeries(project, title, args.from, args.to, args.noCache);
       const summary = summarizeSeries(views.points, args.from, args.to);
@@ -216,33 +199,19 @@ export async function runFetch(args: FetchArgs): Promise<FetchOutput> {
       });
     } catch (error) {
       if (error instanceof ArticleNotFound) {
-        unavailable.push({
-          lang,
-          project,
-          status: 'no_data',
-          title,
-          reason: message('NO_PAGEVIEWS_DATA', { project, title, from: args.from, to: args.to }),
-          requiresConfirmation: false,
-          searchQuery: null,
-          searchHits: 0,
-          alternatives: [],
-        });
+        unavailable.push(
+          failedLanguage(lang, title, 'no_data', message('NO_PAGEVIEWS_DATA', { project, title, from: args.from, to: args.to })),
+        );
         continue;
       }
+
       if (error instanceof SkillError) {
-        unavailable.push({
-          lang,
-          project,
-          status: 'fetch_failed',
-          title,
-          reason: message('LANGUAGE_FETCH_FAILED', { code: error.code, message: error.message }),
-          requiresConfirmation: false,
-          searchQuery: null,
-          searchHits: 0,
-          alternatives: [],
-        });
+        unavailable.push(
+          failedLanguage(lang, title, 'fetch_failed', message('LANGUAGE_FETCH_FAILED', { code: error.code, message: error.message })),
+        );
         continue;
       }
+
       throw error;
     }
   }
@@ -256,29 +225,20 @@ export async function runFetch(args: FetchArgs): Promise<FetchOutput> {
     );
   }
 
-  const dir = outputDir();
-  await mkdir(dir, { recursive: true });
-  const file = args.out ?? join(dir, `views-${args.qid}-${args.from}_${args.to}.json`);
-  await writeFile(
-    file,
-    JSON.stringify(
-      {
-        qid: args.qid,
-        from: args.from,
-        to: args.to,
-        access: ACCESS,
-        agent: AGENT,
-        granularity: GRANULARITY,
-        fetchedAt: new Date().toISOString(),
-        coverage: { requested: args.langs.length, available: series.length, unavailable: unavailable.length },
-        series: stored,
-        unavailable,
-      },
-      null,
-      2,
-    ),
-    'utf8',
-  );
+  const file = args.out ?? join(outputDir(), `views-${args.qid}-${args.from}_${args.to}.json`);
+
+  await writeArtifact(file, {
+    qid: args.qid,
+    from: args.from,
+    to: args.to,
+    access: ACCESS,
+    agent: AGENT,
+    granularity: GRANULARITY,
+    fetchedAt: new Date().toISOString(),
+    coverage: { requested: args.langs.length, available: series.length, unavailable: unavailable.length },
+    series: stored,
+    unavailable,
+  });
 
   return {
     ok: true,

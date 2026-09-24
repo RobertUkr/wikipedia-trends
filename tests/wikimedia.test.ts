@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  actionApiUrl,
+  articleUrl,
   articleViewsUrl,
   getArticleViews,
   getProjectTotals,
@@ -23,6 +25,23 @@ function json(body: unknown, status = 200, headers: Record<string, string> = {})
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe('actionApiUrl', () => {
+  it('builds an api.php URL with the params first and JSON format version 2 last', () => {
+    expect(actionApiUrl('www.wikidata.org', { action: 'wbgetentities', ids: 'Q1|Q2' })).toBe(
+      'https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q1%7CQ2&format=json&formatversion=2',
+    );
+  });
+});
+
+describe('articleUrl', () => {
+  it('links the article on the normalized project with underscores and encoding', () => {
+    expect(articleUrl('uk', 'Київ (місто)')).toBe(
+      `https://uk.wikipedia.org/wiki/${encodeURIComponent('Київ_(місто)')}`,
+    );
+    expect(articleUrl('https://en.wikipedia.org/', 'A&B')).toBe('https://en.wikipedia.org/wiki/A%26B');
+  });
 });
 
 describe('normalizeProject', () => {

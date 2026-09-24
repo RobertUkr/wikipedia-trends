@@ -2,7 +2,8 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { enumerateDates, runFetch, summarizeSeries } from '../src/commands/fetch.js';
+import { runFetch, summarizeSeries } from '../src/commands/fetch.js';
+import { enumerateDates } from '../src/lib/normalize.js';
 
 describe('enumerateDates', () => {
   it('is inclusive on both ends', () => {

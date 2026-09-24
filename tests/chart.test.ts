@@ -225,6 +225,16 @@ describe('axis bounds', () => {
     expect(ticks.ticks.length).toBeGreaterThanOrEqual(3);
   });
 
+  it('gives a flat series a readable axis even when rounding leaves it a hair off flat', () => {
+    const domain = yDomain([0.024999999999999998, 0.025]);
+    const ticks = niceTicks(domain);
+
+    expect(domain.max - domain.min).toBeGreaterThan(0.001);
+    expect(ticks.ticks.length).toBeGreaterThanOrEqual(3);
+    expect(ticks.ticks.length).toBeLessThanOrEqual(12);
+    expect(niceTicks({ min: 0.024999999999999998, max: 0.025 }).ticks.length).toBeLessThanOrEqual(12);
+  });
+
   it('keeps date ticks inside the date range', () => {
     const domain = { min: dayNumber('2023-09-01'), max: dayNumber('2026-09-01') };
     const ticks = dateTicks(domain);

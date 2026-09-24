@@ -75,8 +75,7 @@ describe('descriptive statistics', () => {
 describe('theilSen', () => {
   it('recovers a known +10%/year growth from a noisy series', () => {
     const values = noisy(730, (index) => 100 + (10 * index) / 365, 3);
-    const fit = theilSen(toPoints(values));
-    const trend = trendPercentPerYear(fit, values);
+    const trend = trendPercentPerYear(values);
 
     expect(trend.percentPerYear).toBeGreaterThan(8.5);
     expect(trend.percentPerYear).toBeLessThan(11.5);
@@ -89,17 +88,57 @@ describe('theilSen', () => {
 
     expect(fit.ci95[0]).toBeLessThanOrEqual(0);
     expect(fit.ci95[1]).toBeGreaterThanOrEqual(0);
-    expect(Math.abs(trendPercentPerYear(fit, values).percentPerYear ?? 0)).toBeLessThan(2);
+    expect(Math.abs(trendPercentPerYear(values).percentPerYear ?? 0)).toBeLessThan(2);
   });
 
   it('reports a falling series as negative, not as growth', () => {
     const values = noisy(730, (index) => 200 - (40 * index) / 365, 4);
     const fit = theilSen(toPoints(values));
-    const trend = trendPercentPerYear(fit, values);
+    const trend = trendPercentPerYear(values);
 
     expect(fit.slope).toBeLessThan(0);
     expect(trend.percentPerYear).toBeLessThan(-15);
     expect(trend.ci95?.[1]).toBeLessThan(0);
+  });
+
+  it('never reports a decline steeper than -100%/year, even when a linear fit would cross zero', () => {
+    const values = Array.from({ length: 35 }, (_, week) => 20 * Math.exp(-0.06 * week));
+    const linear = theilSen(toPoints(values));
+    const trend = trendPercentPerYear(values, WEEKS_PER_YEAR);
+
+    expect((linear.slope * WEEKS_PER_YEAR * 100) / linear.intercept).toBeLessThan(-100);
+    expect(trend.percentPerYear).toBeGreaterThan(-100);
+    expect(trend.percentPerYear).toBeCloseTo((Math.exp(-0.06 * WEEKS_PER_YEAR) - 1) * 100, 0);
+    expect(trend.direction).toBe('down');
+  });
+
+  it('reads weeks with zero views without failing the log fit', () => {
+    const values = [4, 0, 3, 5, 0, 2, 1, 0, 1, 0, 1, 0];
+    const trend = trendPercentPerYear(values, WEEKS_PER_YEAR);
+
+    expect(trend.percentPerYear).not.toBeNull();
+    expect(trend.percentPerYear).toBeGreaterThan(-100);
+  });
+
+  it('gives no percent when fewer than three periods have views', () => {
+    expect(trendPercentPerYear([0, 0, 5, 0, 1, 0]).percentPerYear).toBeNull();
+  });
+
+  it('keeps the same up/down verdict as a linear fit, because a log keeps every pairwise sign', () => {
+    const series = [
+      noisy(104, (week) => 50 + week * 0.4, 6, 3),
+      noisy(104, (week) => 80 - week * 0.3, 9, 5),
+      noisy(104, () => 60, 10, 9),
+    ];
+
+    for (const values of series) {
+      const linear = theilSen(toPoints(values)).ci95;
+      const linearVerdict = linear[0] > 0 ? 'up' : linear[1] < 0 ? 'down' : 'spans';
+      const { direction } = trendPercentPerYear(values, WEEKS_PER_YEAR);
+      const logVerdict = direction === 'up' || direction === 'down' ? direction : 'spans';
+
+      expect(logVerdict).toBe(linearVerdict);
+    }
   });
 
   it('is unmoved by a spike that would drag an ordinary least squares fit', () => {
@@ -223,12 +262,10 @@ describe('autocorrelation', () => {
     const values = ar1(days, 0.8, 8, 100, 31);
     const dates = isoDates(days);
 
-    const dailyFit = theilSen(toPoints(values));
-    const daily = trendPercentPerYear(dailyFit, values);
+    const daily = trendPercentPerYear(values);
 
     const weekly = aggregateWeekly(values, dates);
-    const weeklyFit = theilSen(toPoints(weekly.values));
-    const weeklyTrend = trendPercentPerYear(weeklyFit, weekly.values, WEEKS_PER_YEAR);
+    const weeklyTrend = trendPercentPerYear(weekly.values, WEEKS_PER_YEAR);
 
     const dailyWidth = (daily.ci95 as [number, number])[1] - (daily.ci95 as [number, number])[0];
     const weeklyWidth = (weeklyTrend.ci95 as [number, number])[1] - (weeklyTrend.ci95 as [number, number])[0];
@@ -242,9 +279,9 @@ describe('autocorrelation', () => {
     const values = ar1(days, 0.8, 8, 100, 31).map((value, index) => value + (20 * index) / 365);
     const dates = isoDates(days);
 
-    const daily = trendPercentPerYear(theilSen(toPoints(values)), values);
+    const daily = trendPercentPerYear(values);
     const weekly = aggregateWeekly(values, dates);
-    const weeklyTrend = trendPercentPerYear(theilSen(toPoints(weekly.values)), weekly.values, WEEKS_PER_YEAR);
+    const weeklyTrend = trendPercentPerYear(weekly.values, WEEKS_PER_YEAR);
 
     expect(daily.percentPerYear).toBeGreaterThan(10);
     expect(weeklyTrend.percentPerYear).toBeGreaterThan(10);
@@ -288,7 +325,7 @@ describe('trendDirection', () => {
     const rising = noisy(730, (index) => 100 + (30 * index) / 365, 3);
     const flat = noisy(730, () => 100, 1, 8);
 
-    expect(trendPercentPerYear(theilSen(toPoints(rising)), rising).direction).toBe('up');
-    expect(trendPercentPerYear(theilSen(toPoints(flat)), flat).direction).toBe('flat');
+    expect(trendPercentPerYear(rising).direction).toBe('up');
+    expect(trendPercentPerYear(flat).direction).toBe('flat');
   });
 });

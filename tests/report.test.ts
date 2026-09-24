@@ -5,16 +5,21 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { render } from '../src/lib/messages.js';
 import {
   chartSeries,
+  confidenceCell,
+  explorationOrder,
   headline,
   missingDaysDetail,
   pickTopic,
   recommendation,
   renderReport,
+  reportFileName,
   selectCaveats,
   signed,
   trendBand,
   trustLine,
+  verdictLines,
   weakestComponent,
+  zeroDaysDetail,
 } from '../src/lib/report.js';
 import type { ComponentName, ConfidenceComponent } from '../src/lib/confidence.js';
 import type { ReportInput, ReportLanguage, ReportTrend } from '../src/lib/report.js';
@@ -53,6 +58,7 @@ function input(languages: ReportLanguage[]): ReportInput {
     topic: 'Тема',
     languages,
     caveats: [],
+    ranking: languages.map((item) => item.lang),
     source: 'test',
   };
 }
@@ -68,7 +74,7 @@ describe('headline', () => {
 
     expect(result.code).toBe('HEADLINE_GROWING');
     expect(render(result, 'uk')).toContain('лідер — en, +12%/рік');
-    expect(render(result, 'uk')).toContain('в останні тижні — без ясного напрямку');
+    expect(render(result, 'uk')).toContain('з 2024-01-02 — без ясного напрямку');
   });
 
   it('says rank 1 is the slowest decline when everything falls', () => {
@@ -112,7 +118,7 @@ describe('headline', () => {
 
     expect(result.code).toBe('HEADLINE_SINGLE');
     expect(text).toContain('за період — падає (-7.7%/рік, 95% [-11.7; -3.5])');
-    expect(text).toContain('в останні тижні — без ясного напрямку (+1%/рік)');
+    expect(text).toContain('з 2024-01-02 — без ясного напрямку (+1%/рік)');
     expect(text).not.toContain('зростає');
   });
 });
@@ -192,6 +198,35 @@ describe('recommendation', () => {
 
   it('has nothing to recommend for a single language', () => {
     expect(recommendation(input([language('uk', trend(5, [1, 9], 'up'))]))).toBeNull();
+  });
+});
+
+describe('reportFileName', () => {
+  it('gives one short ASCII name per topic, so a follow-up updates the same report', () => {
+    expect(reportFileName('English language', 'Q1860')).toBe('english-language-q1860.pdf');
+  });
+
+  it('keeps topics with the same English label apart', () => {
+    expect(reportFileName('Mercury', 'Q308')).not.toBe(reportFileName('mercury', 'Q925'));
+  });
+
+  it('drops diacritics and punctuation and falls back when nothing Latin is left', () => {
+    expect(reportFileName('Přerušovaný půst: 16/8', 'Q1')).toBe('prerusovany-pust-16-8-q1.pdf');
+    expect(reportFileName('Астрономія', 'Q333')).toBe('q333.pdf');
+  });
+});
+
+describe('explorationOrder', () => {
+  it('lists the compare ranking even when no language can be recommended', () => {
+    const base = input([language('en', trend(-11, [-13, -9], 'down')), language('de', trend(-0.6, [-3.6, 2.4], 'flat'))]);
+    const result = explorationOrder({ ...base, ranking: ['de', 'en'] });
+
+    expect(render(result as never, 'uk')).toContain('від найперспективнішого: de → en');
+    expect(verdictLines({ ...base, ranking: ['de', 'en'] }).map((line) => line.code)).toContain('RECOMMEND_ORDER');
+  });
+
+  it('says nothing for a single language', () => {
+    expect(explorationOrder(input([language('uk', trend(5, [1, 9], 'up'))]))).toBeNull();
   });
 });
 
@@ -284,6 +319,18 @@ describe('helpers', () => {
 
     expect(render(detail, 'uk')).toBe('Пропущені дні, інтерпольовано: cs 2');
   });
+
+  it('lists days with zero views apart from the interpolated gaps', () => {
+    const report = input([language('cs', trend(-5, [-9, -1], 'down'), { zeroDays: 3 }), language('uk', trend(-5, [-9, -1], 'down'))]);
+
+    expect(render(zeroDaysDetail(report)!, 'uk')).toBe('Дні без переглядів, враховано як 0: cs 3');
+    expect(zeroDaysDetail(input([language('uk', trend(-5, [-9, -1], 'down'))]))).toBeNull();
+  });
+
+  it('shows the score plainly only when it agrees with the level', () => {
+    expect(render(confidenceCell({ overall: 'medium', score: 0.6, caveats: [] }), 'uk')).toBe('середня (0.6)');
+    expect(render(confidenceCell({ overall: 'low', score: 0.66, caveats: [] }), 'uk')).toBe('низька (знижено)');
+  });
 });
 
 describe('renderReport', () => {
@@ -321,5 +368,40 @@ describe('renderReport', () => {
 
     expect(svg).toContain('перегляди на мільйон трафіку розділу');
     expect(result.headline.code).toBe('HEADLINE_MIXED_DOWN');
+  });
+
+  it('keeps a one-page PDF when languages without data are listed', async () => {
+    const pdfPath = join(dir, 'report.pdf');
+    const result = await renderReport(
+      {
+        ...input([language('cs', trend(-25.8, [-30.8, -21], 'down'), { zeroDays: 3 })]),
+        unavailable: [{ lang: 'pl', reason: 'окремої статті про тему немає' }],
+      },
+      'uk',
+      pdfPath,
+    );
+
+    const raw = (await readFile(result.pdf)).toString('latin1');
+
+    expect(raw).toMatch(/\/Type \/Pages[\s\S]*?\/Count 1\b/);
+  });
+});
+
+describe('isUsable', () => {
+  it('reuses the one artifact of a topic only for the same schema, period and languages', async () => {
+    const { isUsable } = await import('../src/commands/report.js');
+    const { ARTIFACT_SCHEMA } = await import('../src/commands/analyze.js');
+    const stored = {
+      schema: ARTIFACT_SCHEMA,
+      kind: 'compare' as const,
+      qid: 'Q1',
+      from: '2024-01-01',
+      to: '2025-12-31',
+      languages: [{ lang: 'en' }, { lang: 'uk' }],
+    } as never;
+
+    expect(isUsable(stored, ['en', 'uk'], '2024-01-01', '2025-12-31')).toBe(true);
+    expect(isUsable(stored, ['en', 'uk'], '2023-01-01', '2025-12-31')).toBe(false);
+    expect(isUsable(stored, ['en', 'pl'], '2024-01-01', '2025-12-31')).toBe(false);
   });
 });

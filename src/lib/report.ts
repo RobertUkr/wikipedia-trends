@@ -7,6 +7,7 @@ import SVGtoPDF from 'svg-to-pdfkit';
 import { packageRoot } from './cache.js';
 import { CHART_HEIGHT, CHART_WIDTH, FONT_FAMILY, lineChart } from './chart.js';
 import type { ChartSeries, TrendBand } from './chart.js';
+import { levelFromScore } from './confidence.js';
 import type { ComponentName, ConfidenceComponent, ConfidenceLevel } from './confidence.js';
 import { message, render } from './messages.js';
 import type { Locale } from './messages.js';
@@ -23,15 +24,19 @@ const FOOTER_HEIGHT = 40;
 
 export const LANGUAGE_CAVEAT_PRIORITY: MessageCode[] = [
   'TREND_REVERSAL',
+  'TITLE_HISTORY_MERGED',
   'EDITION_TRAFFIC_DECLINING',
   'ABSOLUTE_VS_RELATIVE',
   'SLOPE_SIGN_UNSTABLE',
   'LOW_VOLUME',
   'LONG_GAP_POSSIBLE_RENAME',
+  'ZERO_VIEW_DAYS',
   'INTERVAL_SPANS_ZERO',
   'RAW_COUNTS_NOT_COMPARABLE',
 ];
 
+export const COMPACT_FROM_LANGS = 4;
+export const MAX_REPORT_LANGS = 8;
 export const ONCE_PER_REPORT: MessageCode[] = ['TWO_TRENDS_EXPLAINED', 'WEEKLY_AGGREGATION'];
 
 export interface ReportTrend {
@@ -66,6 +71,7 @@ export interface ReportLanguage {
   };
   outlierDates: string[];
   missingDays: number;
+  zeroDays?: number;
   points: ReportPoint[];
 }
 
@@ -77,7 +83,9 @@ export interface ReportInput {
   topic: string;
   languages: ReportLanguage[];
   caveats: Message[];
+  ranking: string[];
   source: string;
+  unavailable?: Array<{ lang: string; reason: string }>;
 }
 
 export interface RenderedReport {
@@ -121,6 +129,21 @@ export function pickTopic(languages: Array<{ lang: string; title: string }>, loc
   return preferred?.title ?? languages[0]?.title ?? fallback;
 }
 
+export function reportFileName(name: string, qid: string): string {
+  const slug = name
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40)
+    .replace(/-+$/, '');
+
+  const id = qid.toLowerCase();
+
+  return slug ? `${slug}-${id}.pdf` : `${id}.pdf`;
+}
+
 export function headline(input: ReportInput): Message {
   const languages = input.languages;
   const topic = input.topic;
@@ -138,6 +161,7 @@ export function headline(input: ReportInput): Message {
       low: signed(primary.ci95?.[0] ?? null),
       high: signed(primary.ci95?.[1] ?? null),
       recent: directionMessage(only.recentTrend?.direction ?? 'inconclusive'),
+      since: only.recentTrend?.from ?? '—',
       recentPercent: signed(only.recentTrend?.percentPerYear ?? null),
       confidence: confidenceMessage(only.confidence.overall),
     });
@@ -156,6 +180,7 @@ export function headline(input: ReportInput): Message {
       leader: leader.lang,
       percent: signed(leader.trend.percentPerYear),
       recent: directionMessage(leader.recentTrend?.direction ?? 'inconclusive'),
+      since: leader.recentTrend?.from ?? '—',
       confidence: confidenceMessage(leader.confidence.overall),
     });
   }
@@ -169,6 +194,7 @@ export function headline(input: ReportInput): Message {
       leader: slowest?.lang ?? '',
       percent: signed(slowest?.trend.percentPerYear ?? null),
       recent: directionMessage(slowest?.recentTrend?.direction ?? 'inconclusive'),
+      since: slowest?.recentTrend?.from ?? '—',
     });
   }
 
@@ -268,11 +294,18 @@ export function recommendation(input: ReportInput): Message | null {
   return message('RECOMMEND_NONE_NO_DIRECTION');
 }
 
+export function explorationOrder(input: ReportInput): Message | null {
+  if (input.languages.length < 2 || input.ranking.length < 2) {
+    return null;
+  }
+
+  return message('RECOMMEND_ORDER', { order: input.ranking.join(' → ') });
+}
+
 export function verdictLines(input: ReportInput): Message[] {
   const lines = input.languages.map(trustLine).filter((line): line is Message => line !== null);
-  const advice = recommendation(input);
 
-  return advice ? [...lines, advice] : lines;
+  return [...lines, recommendation(input), explorationOrder(input)].filter((line): line is Message => line !== null);
 }
 
 function addDays(date: string, days: number): string {
@@ -363,6 +396,28 @@ export function missingDaysDetail(input: ReportInput): Message {
   });
 }
 
+export function zeroDaysDetail(input: ReportInput): Message | null {
+  const zero = input.languages.filter((item) => (item.zeroDays ?? 0) > 0);
+
+  if (zero.length === 0) {
+    return null;
+  }
+
+  return message('REPORT_FOOTER_ZERO_DAYS', {
+    detail: zero.map((item) => `${item.lang} ${item.zeroDays}`).join(', '),
+  });
+}
+
+export function confidenceCell(confidence: ReportLanguage['confidence']): Message {
+  const level = confidenceMessage(confidence.overall);
+
+  if (levelFromScore(confidence.score) === confidence.overall) {
+    return message('REPORT_CONFIDENCE_CELL', { level, score: confidence.score });
+  }
+
+  return message('REPORT_CONFIDENCE_CAPPED', { level });
+}
+
 function fontPath(name: string): string {
   return join(packageRoot(), 'assets', 'fonts', `${name}.ttf`);
 }
@@ -442,7 +497,10 @@ export async function renderReport(input: ReportInput, locale: Locale, pdfPath: 
   doc.font(FONT_BOLD).fontSize(11).fillColor('#111827').text(render(summary, locale), left, y, { width: CONTENT_WIDTH });
   y = doc.y + 4;
 
-  for (const line of verdictLines(input)) {
+  const compact = input.languages.length > COMPACT_FROM_LANGS;
+  const lines = compact ? [recommendation(input), explorationOrder(input)].filter((line): line is Message => line !== null) : verdictLines(input);
+
+  for (const line of lines) {
     doc.font(FONT_REGULAR).fontSize(8.5).fillColor('#1f2937').text(render(line, locale), left, y, { width: CONTENT_WIDTH });
     y = doc.y + 2;
   }
@@ -514,13 +572,27 @@ export async function renderReport(input: ReportInput, locale: Locale, pdfPath: 
         ciCell(primary),
         trendCell(item.recentTrend, locale),
         String(Math.round(item.medianPerMillion * 100) / 100),
-        `${t(CONFIDENCE_CODES[item.confidence.overall])} (${item.confidence.score})`,
+        render(confidenceCell(item.confidence), locale),
       ],
       false,
       false,
-      item.title,
+      compact ? null : item.title,
     );
     doc.moveTo(left, y).lineTo(left + CONTENT_WIDTH, y).lineWidth(0.3).strokeColor('#e5e7eb').stroke();
+  }
+
+  const unavailable = input.unavailable ?? [];
+
+  if (unavailable.length > 0) {
+    y += 10;
+    doc.font(FONT_BOLD).fontSize(10).fillColor('#111827').text(t('RESEARCH_UNAVAILABLE_TITLE'), left, y, { width: CONTENT_WIDTH });
+    y = doc.y + 3;
+    doc.font(FONT_REGULAR).fontSize(7.5).fillColor('#1f2937');
+
+    for (const item of unavailable) {
+      doc.text(`• ${item.lang}: ${item.reason}`, left, y, { width: CONTENT_WIDTH });
+      y = doc.y + 2;
+    }
   }
 
   y += 10;
@@ -564,7 +636,9 @@ export async function renderReport(input: ReportInput, locale: Locale, pdfPath: 
     footerY + 9,
     { width: CONTENT_WIDTH, lineBreak: false },
   );
-  doc.text(render(missingDaysDetail(input), locale), left, footerY + 18, { width: CONTENT_WIDTH, lineBreak: false });
+  const zero = zeroDaysDetail(input);
+  const coverage = [missingDaysDetail(input), ...(zero ? [zero] : [])].map((line) => render(line, locale)).join(' · ');
+  doc.text(coverage, left, footerY + 18, { width: CONTENT_WIDTH, lineBreak: false });
 
   doc.end();
   await finished(stream);

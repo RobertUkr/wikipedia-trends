@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CRITERION, WEIGHTS, buildCompareCaveats, minMaxScale, rank } from '../src/commands/compare.js';
 import type { LanguageAnalysis } from '../src/commands/analyze.js';
+import { trendDirection } from '../src/lib/stats.js';
 import type { Message } from '../src/types.js';
 
 function codes(messages: Message[]): string[] {
@@ -24,7 +25,13 @@ function analysis(options: FakeOptions): LanguageAnalysis {
     project: `${options.lang}.wikipedia.org`,
     title: `Article ${options.lang}`,
     unit: options.unit ?? 'views_per_million',
-    trend: { percentPerYear: options.percentPerYear, ci95: options.ci95, baseline: 10, baselineSource: 'intercept' },
+    trend: {
+      percentPerYear: options.percentPerYear,
+      ci95: options.ci95,
+      direction: trendDirection(options.ci95),
+      baseline: 10,
+      baselineSource: 'intercept',
+    },
     level: { median: options.median },
     confidence: { overall: options.overall ?? 'high', score: options.confidenceScore, caveats: [] },
     fit: { ci95: options.ci95 },
@@ -66,11 +73,37 @@ describe('rank', () => {
   it('marks a language whose interval spans zero', () => {
     const ranked = rank([
       analysis({ lang: 'a', percentPerYear: 40, ci95: [30, 50], median: 10, confidenceScore: 0.8 }),
-      analysis({ lang: 'b', percentPerYear: 1, ci95: [-5, 5], median: 10, confidenceScore: 0.8 }),
+      analysis({ lang: 'b', percentPerYear: 1, ci95: [-20, 22], median: 10, confidenceScore: 0.8 }),
+      analysis({ lang: 'c', percentPerYear: 0, ci95: [-3, 3], median: 10, confidenceScore: 0.8 }),
     ]);
 
     expect(codes(ranked.find((item) => item.lang === 'b')?.notes ?? [])).toContain('NOTE_SPANS_ZERO');
+    expect(codes(ranked.find((item) => item.lang === 'c')?.notes ?? [])).not.toContain('NOTE_SPANS_ZERO');
     expect(codes(ranked.find((item) => item.lang === 'a')?.notes ?? [])).toEqual(['NOTE_NO_RESERVATIONS']);
+  });
+
+  it('puts a language whose trend could not be measured below one with a measured decline', () => {
+    const unmeasured = analysis({ lang: 'uk', percentPerYear: 0, ci95: [-1, 1], median: 0, confidenceScore: 0.3, overall: 'low' });
+    const ranked = rank([
+      analysis({ lang: 'en', percentPerYear: -4.8, ci95: [-8.6, -1.2], median: 8.28, confidenceScore: 0.7 }),
+      { ...unmeasured, trend: { ...unmeasured.trend, percentPerYear: null } } as typeof unmeasured,
+    ]);
+
+    expect(ranked.map((item) => item.lang)).toEqual(['en', 'uk']);
+  });
+
+  it('keeps raw counts out of the level comparison instead of scaling them against per-million values', () => {
+    const ranked = rank([
+      analysis({ lang: 'a', percentPerYear: 10, ci95: [5, 15], median: 10, confidenceScore: 0.8 }),
+      analysis({ lang: 'b', percentPerYear: 10, ci95: [5, 15], median: 20, confidenceScore: 0.8 }),
+      analysis({ lang: 'c', percentPerYear: 10, ci95: [5, 15], median: 5000, confidenceScore: 0.8, unit: 'raw_views' }),
+    ]);
+
+    const raw = ranked.find((item) => item.lang === 'c');
+
+    expect(raw?.perspective).toBeCloseTo(WEIGHTS.growth * 0.5 + WEIGHTS.level * 0.5 + WEIGHTS.confidence * 0.8, 3);
+    expect(raw?.medianPerMillion).toBeNull();
+    expect(ranked[0]?.lang).toBe('b');
   });
 
   it('warns that a low-confidence position is indicative only', () => {

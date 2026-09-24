@@ -222,29 +222,43 @@ export function trendDirection(ci95: [number, number] | null): Direction {
   return 'inconclusive';
 }
 
-export function trendPercentPerYear(
-  fit: TrendFit,
-  values: number[],
-  periodsPerYear: number = YEAR_DAYS,
-): TrendPercent {
-  const fromIntercept = fit.intercept;
-  const fromMedian = median(values);
-  const baseline = fromIntercept > 0 ? fromIntercept : fromMedian;
-  const baselineSource = fromIntercept > 0 ? 'intercept' : fromMedian > 0 ? 'median' : 'none';
+export function logOffset(values: number[]): number | null {
+  const positive = values.filter((value) => value > 0);
 
-  if (baseline <= 0) {
+  if (positive.length < 3) {
+    return null;
+  }
+
+  if (positive.length === values.length) {
+    return 0;
+  }
+
+  return Math.min(...positive) / 2;
+}
+
+export function compoundPercent(logSlope: number, periodsPerYear: number): number {
+  return (Math.exp(logSlope * periodsPerYear) - 1) * 100;
+}
+
+export function trendPercentPerYear(values: number[], periodsPerYear: number = YEAR_DAYS): TrendPercent {
+  const offset = logOffset(values);
+
+  if (offset === null) {
     return { percentPerYear: null, ci95: null, direction: 'inconclusive', baseline: 0, baselineSource: 'none' };
   }
 
-  const scale = (slope: number) => round1((slope * periodsPerYear * 100) / baseline);
-  const ci95: [number, number] = [scale(fit.ci95[0]), scale(fit.ci95[1])];
+  const logFit = theilSen(toPoints(values.map((value) => Math.log(Math.max(value, 0) + offset))));
+  const exact: [number, number] = [
+    compoundPercent(logFit.ci95[0], periodsPerYear),
+    compoundPercent(logFit.ci95[1], periodsPerYear),
+  ];
 
   return {
-    percentPerYear: scale(fit.slope),
-    ci95,
-    direction: trendDirection(ci95),
-    baseline,
-    baselineSource,
+    percentPerYear: round1(compoundPercent(logFit.slope, periodsPerYear)),
+    ci95: [round1(exact[0]), round1(exact[1])],
+    direction: trendDirection(exact),
+    baseline: Math.exp(logFit.intercept) - offset,
+    baselineSource: 'intercept',
   };
 }
 

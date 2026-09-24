@@ -39,6 +39,10 @@ function router(article: (index: number) => number, totals: (index: number) => n
       return Promise.resolve(json({ entities: { Q1: { sitelinks: { enwiki: { site: 'enwiki', title: 'Topic' } } } } }));
     }
 
+    if (target.includes('prop=revisions')) {
+      return Promise.resolve(json({ query: { pages: [{ revisions: [] }] } }));
+    }
+
     if (target.includes('per-article')) {
       return Promise.resolve(json(items(article)));
     }
@@ -101,7 +105,7 @@ describe('absolute and relative trends', () => {
 
     expect(result.absoluteTrend.percentPerYear).toBeLessThan(-20);
     expect(result.relativeTrend?.percentPerYear).toBeLessThan(-20);
-    expect(codes(result.confidence.caveats)).toContain('ABSOLUTE_VS_RELATIVE');
+    expect(codes(result.confidence.caveats)).not.toContain('ABSOLUTE_VS_RELATIVE');
     expect(codes(result.confidence.caveats)).not.toContain('EDITION_TRAFFIC_DECLINING');
   });
 
@@ -180,5 +184,236 @@ describe('recent trend', () => {
     expect(result.recentTrend).not.toBeNull();
     expect(result.reversal).toBeNull();
     expect(codes(result.confidence.caveats)).not.toContain('TREND_REVERSAL');
+  });
+});
+
+describe('article history', () => {
+  it('refuses to fit a trend when the title has data only for the last months, as after a rename', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string) => {
+        const target = String(url);
+
+        if (target.includes('per-article')) {
+          const all = items(() => 50).items;
+
+          return Promise.resolve(json({ items: all.slice(DAYS - 120) }));
+        }
+
+        return Promise.resolve(json(items(() => 2_000_000_000)));
+      }),
+    );
+
+    await expect(analyzeLanguage('Q1', 'de', 'Neuer Titel', START, LAST_DAY, true)).rejects.toMatchObject({
+      code: 'ShortHistory',
+      details: { first: dates(DAYS)[DAYS - 120] },
+    });
+  });
+});
+
+describe('renamed articles', () => {
+  it('follows the Wikidata title history and takes each title only while it named the article', async () => {
+    const all = items(() => 50).items;
+    const renamed = dates(DAYS)[DAYS - 120] as string;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string) => {
+        const target = String(url);
+
+        if (target.includes('prop=revisions')) {
+          return Promise.resolve(
+            json({
+              query: {
+                pages: [
+                  {
+                    revisions: [
+                      { timestamp: `${renamed}T10:00:00Z`, comment: '/* clientsitelink-update:0|dewiki|dewiki:Old title|dewiki:New title */' },
+                    ],
+                  },
+                ],
+              },
+            }),
+          );
+        }
+
+        if (target.includes('per-article') && target.includes('Old_title')) {
+          return Promise.resolve(json({ items: all.slice(0, DAYS - 120) }));
+        }
+
+        if (target.includes('per-article')) {
+          return Promise.resolve(json({ items: all.slice(DAYS - 120) }));
+        }
+
+        return Promise.resolve(json(items(() => 2_000_000_000)));
+      }),
+    );
+
+    const result = await analyzeLanguage('Q1', 'de', 'New title', START, LAST_DAY, true);
+
+    expect(result.series.leadingGapDays).toBe(0);
+    expect(result.series.zeroDays).toBe(0);
+    expect(result.confidence.caveats.find((item) => item.code === 'TITLE_HISTORY_MERGED')?.params).toEqual({
+      titles: 'Old title → New title',
+    });
+  });
+});
+
+describe('manually renamed articles', () => {
+  it('finds the former title among the redirects when the Wikidata edit does not name it', async () => {
+    const all = items(() => 50).items;
+    const renamed = dates(DAYS)[DAYS - 120] as string;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string) => {
+        const target = String(url);
+
+        if (target.includes('wikidata.org')) {
+          return Promise.resolve(
+            json({ query: { pages: [{ revisions: [{ timestamp: `${renamed}T10:00:00Z`, comment: '/* wbsetsitelink-set:1|dewiki */ New title' }] }] } }),
+          );
+        }
+
+        if (target.includes('generator=redirects')) {
+          return Promise.resolve(
+            json({
+              query: {
+                pages: [
+                  { title: 'Typo title', revisions: [{ timestamp: '2019-01-01T00:00:00Z' }] },
+                  { title: 'Old title', revisions: [{ timestamp: `${renamed}T09:59:00Z` }] },
+                ],
+              },
+            }),
+          );
+        }
+
+        if (target.includes('list=logevents') && target.includes('letitle=Old+title')) {
+          return Promise.resolve(
+            json({ query: { logevents: [{ timestamp: `${renamed}T09:59:00Z`, title: 'Old title', params: { target_title: 'New title' } }] } }),
+          );
+        }
+
+        if (target.includes('list=logevents')) {
+          return Promise.resolve(json({ query: { logevents: [] } }));
+        }
+
+        if (target.includes('per-article') && target.includes('Old_title')) {
+          return Promise.resolve(json({ items: all.slice(0, DAYS - 120) }));
+        }
+
+        if (target.includes('per-article')) {
+          return Promise.resolve(json({ items: all.slice(DAYS - 120) }));
+        }
+
+        return Promise.resolve(json(items(() => 2_000_000_000)));
+      }),
+    );
+
+    const result = await analyzeLanguage('Q1', 'de', 'New title', START, LAST_DAY, true);
+
+    expect(result.series.leadingGapDays).toBe(0);
+    expect(result.confidence.caveats.find((item) => item.code === 'TITLE_HISTORY_MERGED')?.params).toEqual({
+      titles: 'Old title → New title',
+    });
+  });
+});
+
+describe('a sitelink updated some days after the move', () => {
+  it('switches titles on the day of the move, not on the day of the Wikidata edit', async () => {
+    const all = items(() => 50).items;
+    const moved = dates(DAYS)[DAYS - 130] as string;
+    const linked = dates(DAYS)[DAYS - 120] as string;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string) => {
+        const target = String(url);
+
+        if (target.includes('wikidata.org')) {
+          return Promise.resolve(
+            json({ query: { pages: [{ revisions: [{ timestamp: `${linked}T10:00:00Z`, comment: '/* wbsetsitelink-set:1|dewiki */ New title' }] }] } }),
+          );
+        }
+
+        if (target.includes('generator=redirects')) {
+          return Promise.resolve(json({ query: { pages: [{ title: 'Old title', revisions: [{ timestamp: `${moved}T08:00:00Z` }] }] } }));
+        }
+
+        if (target.includes('list=logevents')) {
+          return Promise.resolve(
+            json({ query: { logevents: [{ timestamp: `${moved}T08:00:00Z`, title: 'Old title', params: { target_title: 'New title' } }] } }),
+          );
+        }
+
+        if (target.includes('per-article') && target.includes('Old_title')) {
+          return Promise.resolve(json({ items: all.slice(0, DAYS - 130) }));
+        }
+
+        if (target.includes('per-article')) {
+          return Promise.resolve(json({ items: all.slice(DAYS - 130) }));
+        }
+
+        return Promise.resolve(json(items(() => 2_000_000_000)));
+      }),
+    );
+
+    const result = await analyzeLanguage('Q1', 'de', 'New title', START, LAST_DAY, true);
+
+    expect(result.series.leadingGapDays).toBe(0);
+    expect(result.series.zeroDays).toBe(0);
+  });
+});
+
+describe('a title in the middle of the history without data', () => {
+  it('counts its days as a gap instead of as zero views', async () => {
+    const all = items(() => 50).items;
+    const first = dates(DAYS)[200] as string;
+    const second = dates(DAYS)[400] as string;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string) => {
+        const target = String(url);
+
+        if (target.includes('wikidata.org')) {
+          return Promise.resolve(
+            json({
+              query: {
+                pages: [
+                  {
+                    revisions: [
+                      { timestamp: `${second}T10:00:00Z`, comment: '/* clientsitelink-update:0|dewiki|dewiki:Mid|dewiki:New */' },
+                      { timestamp: `${first}T10:00:00Z`, comment: '/* clientsitelink-update:0|dewiki|dewiki:Old|dewiki:Mid */' },
+                    ],
+                  },
+                ],
+              },
+            }),
+          );
+        }
+
+        if (target.includes('per-article') && target.includes('/Mid/')) {
+          return Promise.resolve(json({ type: 'https://mediawiki.org/wiki/HyperSwitch/errors/not_found', title: 'Not found.' }, 404));
+        }
+
+        if (target.includes('per-article') && target.includes('/Old/')) {
+          return Promise.resolve(json({ items: all.slice(0, 200) }));
+        }
+
+        if (target.includes('per-article')) {
+          return Promise.resolve(json({ items: all.slice(400) }));
+        }
+
+        return Promise.resolve(json(items(() => 2_000_000_000)));
+      }),
+    );
+
+    const result = await analyzeLanguage('Q1', 'de', 'New', START, LAST_DAY, true);
+
+    expect(result.series.zeroDays).toBe(0);
+    expect(result.series.missingDays).toBe(200);
+    expect(result.confidence.components.continuity.score).toBeLessThan(1);
+    expect(codes(result.confidence.caveats)).not.toContain('ZERO_VIEW_DAYS');
   });
 });

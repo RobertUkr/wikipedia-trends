@@ -3,7 +3,8 @@ import { join } from 'node:path';
 import { outputDir } from '../lib/cache.js';
 import { render } from '../lib/messages.js';
 import type { Locale } from '../lib/messages.js';
-import { pickTopic, renderReport } from '../lib/report.js';
+import { openFile } from '../lib/open.js';
+import { MAX_REPORT_LANGS, pickTopic, renderReport, reportFileName } from '../lib/report.js';
 import type { ReportInput, ReportLanguage, ReportTrend } from '../lib/report.js';
 import { SkillError } from '../types.js';
 import type { Lang, Message } from '../types.js';
@@ -18,6 +19,9 @@ export interface ReportArgs {
   locale: Locale;
   artifact: string | null;
   noCache: boolean;
+  topic?: string;
+  fileName?: string;
+  unavailable?: Array<{ lang: string; reason: string }>;
 }
 
 export interface ReportOutput {
@@ -30,6 +34,7 @@ export interface ReportOutput {
   svg: string;
   artifact: string;
   artifactReused: boolean;
+  opened: boolean;
   headline: string;
 }
 
@@ -47,7 +52,8 @@ interface StoredLanguage {
   confidence: ReportLanguage['confidence'];
   outliers: { dates: string[] };
   missingDays?: number;
-  coverage?: { missingDays: number };
+  zeroDays?: number;
+  coverage?: { missingDays: number; zeroDays?: number };
   points: Array<{ date: string; perMillion: number | null; smoothed: number }>;
 }
 
@@ -60,12 +66,11 @@ interface StoredArtifact extends Partial<StoredLanguage> {
   days?: number;
   caveats?: Message[];
   languages?: StoredLanguage[];
+  ranking?: Array<{ lang: string }>;
 }
 
-export function artifactPath(qid: string, langs: Lang[], from: string, to: string): string {
-  return langs.length === 1
-    ? join(outputDir(), `analyze-${qid}-${langs[0]}-${from}_${to}.json`)
-    : join(outputDir(), `compare-${qid}-${from}_${to}.json`);
+export function artifactPath(qid: string, langs: Lang[]): string {
+  return langs.length === 1 ? join(outputDir(), `analyze-${qid}-${langs[0]}.json`) : join(outputDir(), `compare-${qid}.json`);
 }
 
 async function exists(path: string): Promise<boolean> {
@@ -78,8 +83,8 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-export function isUsable(artifact: StoredArtifact, langs: Lang[]): boolean {
-  if (artifact.schema !== ARTIFACT_SCHEMA) {
+export function isUsable(artifact: StoredArtifact, langs: Lang[], from: string, to: string): boolean {
+  if (artifact.schema !== ARTIFACT_SCHEMA || artifact.from !== from || artifact.to !== to) {
     return false;
   }
 
@@ -104,11 +109,19 @@ function toLanguage(stored: StoredLanguage): ReportLanguage {
     confidence: stored.confidence,
     outlierDates: stored.outliers.dates,
     missingDays: stored.missingDays ?? stored.coverage?.missingDays ?? 0,
+    zeroDays: stored.zeroDays ?? stored.coverage?.zeroDays ?? 0,
     points: stored.points.map((point) => ({ date: point.date, perMillion: point.perMillion, smoothed: point.smoothed })),
   };
 }
 
-export function toReportInput(artifact: StoredArtifact, langs: Lang[], locale: Locale, source: string): ReportInput {
+export function toReportInput(
+  artifact: StoredArtifact,
+  langs: Lang[],
+  locale: Locale,
+  source: string,
+  topic?: string,
+  unavailable: Array<{ lang: string; reason: string }> = [],
+): ReportInput {
   const stored =
     artifact.kind === 'compare'
       ? (artifact.languages ?? [])
@@ -125,10 +138,12 @@ export function toReportInput(artifact: StoredArtifact, langs: Lang[], locale: L
     from: artifact.from,
     to: artifact.to,
     days: artifact.days ?? languages[0]?.points.length ?? 0,
-    topic: pickTopic(languages, locale, artifact.qid),
+    topic: topic ?? pickTopic(languages, locale, artifact.qid),
     languages,
     caveats: artifact.kind === 'compare' ? (artifact.caveats ?? []) : [],
+    ranking: (artifact.ranking ?? []).map((item) => item.lang).filter((lang) => langs.includes(lang)),
     source,
+    unavailable,
   };
 }
 
@@ -141,12 +156,16 @@ export async function runReport(args: ReportArgs): Promise<ReportOutput> {
     throw new SkillError('InvalidInput', '--langs is required, e.g. --langs en,de,uk');
   }
 
-  const path = args.artifact ?? artifactPath(args.qid, args.langs, args.from, args.to);
+  if (args.langs.length > MAX_REPORT_LANGS) {
+    throw new SkillError('InvalidInput', `a one-page report holds at most ${MAX_REPORT_LANGS} editions`, { langs: args.langs });
+  }
+
+  const path = args.artifact ?? artifactPath(args.qid, args.langs);
   let artifactReused = false;
 
   if (await exists(path)) {
     const stored = JSON.parse(await readFile(path, 'utf8')) as StoredArtifact;
-    artifactReused = isUsable(stored, args.langs);
+    artifactReused = isUsable(stored, args.langs, args.from, args.to);
   }
 
   if (!artifactReused) {
@@ -181,7 +200,7 @@ export async function runReport(args: ReportArgs): Promise<ReportOutput> {
   }
 
   const artifact = JSON.parse(await readFile(path, 'utf8')) as StoredArtifact;
-  const input = toReportInput(artifact, args.langs, args.locale, path);
+  const input = toReportInput(artifact, args.langs, args.locale, path, args.topic, args.unavailable);
 
   if (input.languages.length === 0) {
     throw new SkillError('ArticleNotFound', `None of ${args.langs.join(', ')} has data in ${path}`, { artifact: path });
@@ -189,10 +208,11 @@ export async function runReport(args: ReportArgs): Promise<ReportOutput> {
 
   const pdf = join(
     outputDir(),
-    `report-${args.qid}-${input.languages.map((item) => item.lang).join('-')}-${args.from}_${args.to}-${args.locale}.pdf`,
+    reportFileName(args.fileName ?? input.languages.find((item) => item.lang === 'en')?.title ?? args.qid, args.qid),
   );
 
   const rendered = await renderReport(input, args.locale, pdf);
+  const opened = openFile(rendered.pdf);
 
   return {
     ok: true,
@@ -204,6 +224,7 @@ export async function runReport(args: ReportArgs): Promise<ReportOutput> {
     svg: rendered.svg,
     artifact: path,
     artifactReused,
+    opened,
     headline: render(rendered.headline, args.locale),
   };
 }

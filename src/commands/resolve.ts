@@ -21,7 +21,8 @@ export interface ResolveOutput {
   label: string;
   description: string;
   ambiguous: boolean;
-  candidates: Array<{ qid: string; label: string; description: string; score: number; wikiCount: number }>;
+  matchedBy: 'wikidata' | 'article_search';
+  candidates: Array<{ qid: string; label: string; description: string; score: number; wikiCount: number; langs: Lang[] }>;
   languageCount: number;
   titles: Record<Lang, string>;
   unavailable: LanguageAvailability[];
@@ -49,6 +50,33 @@ export async function runResolve(args: ResolveArgs): Promise<ResolveOutput> {
   }
 
   const resolution = await resolveTopic(args.topic, args.lang);
+  const covered = (titles: Record<Lang, string>) => args.langs.filter((lang) => titles[lang]);
+  const titlesOf = new Map([
+    [resolution.qid, resolution.titles],
+    ...resolution.others.map((other) => [other.qid, other.titles] as const),
+  ]);
+  const widest = Math.max(0, ...resolution.others.map((other) => covered(other.titles).length));
+  const better = resolution.others.filter(
+    (other) =>
+      covered(other.titles).length === widest &&
+      widest > covered(resolution.titles).length &&
+      !resolution.candidates.some((item) => item.qid === other.qid),
+  );
+  const listed =
+    resolution.candidates.length > 0
+      ? resolution.candidates
+      : [
+          {
+            qid: resolution.qid,
+            label: resolution.label,
+            description: resolution.description,
+            score: 0,
+            wikiCount: Object.keys(resolution.titles).length,
+          },
+        ];
+  const chosen =
+    better.length > 0 ? [...listed, ...better.map(({ titles: _titles, ...candidate }) => candidate)] : resolution.candidates;
+  const candidates = chosen.map((item) => ({ ...item, langs: covered(titlesOf.get(item.qid) ?? {}) }));
   const missing = args.langs.filter((lang) => !resolution.titles[lang]);
   const unavailable = await probeLanguages(
     resolution.qid,
@@ -75,8 +103,9 @@ export async function runResolve(args: ResolveArgs): Promise<ResolveOutput> {
     qid: resolution.qid,
     label: resolution.label,
     description: resolution.description,
-    ambiguous: resolution.candidates.length > 0,
-    candidates: resolution.candidates,
+    ambiguous: candidates.length > 0 || resolution.matchedBy === 'article_search',
+    matchedBy: resolution.matchedBy,
+    candidates,
     languageCount: Object.keys(resolution.titles).length,
     titles: pickSample(resolution.titles, args.lang, args.langs),
     unavailable,

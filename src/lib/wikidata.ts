@@ -179,7 +179,12 @@ export async function resolveTopic(
   const entries = await search().then((found) => (found.length > 0 ? found : search()));
 
   if (entries.length === 0) {
-    throw new TopicNotFound(trimmed, sourceLang);
+    const fromArticles = await resolveByArticleSearch(trimmed, sourceLang, opts);
+    if (!fromArticles) {
+      throw new TopicNotFound(trimmed, sourceLang);
+    }
+
+    return fromArticles;
   }
 
   const scored = entries
@@ -200,7 +205,9 @@ export async function resolveTopic(
       score: item.score,
       wikiCount: Object.keys(sitelinkMap[item.entry.id] ?? {}).length,
     }))
-    .filter((candidate) => candidate.wikiCount > 0);
+    .filter((candidate) => candidate.wikiCount > 0 && !isDisambiguation(candidate, sitelinkMap[candidate.qid] ?? {}));
+  const namesArticle = (candidate: TopicCandidate) =>
+    normalize(sitelinkMap[candidate.qid]?.[sourceLang]) === normalize(trimmed);
 
   const top = candidates[0];
 
@@ -212,7 +219,9 @@ export async function resolveTopic(
     );
   }
 
-  const byScore = candidates.filter((candidate) => top.score - candidate.score <= AMBIGUITY_DELTA);
+  const byScore = candidates.filter(
+    (candidate) => top.score - candidate.score <= AMBIGUITY_DELTA || namesArticle(candidate),
+  );
   const mostLinked = Math.max(...byScore.map((candidate) => candidate.wikiCount));
   const close = byScore
     .filter((candidate) => candidate.wikiCount >= mostLinked * NOTABILITY_RATIO)
@@ -225,7 +234,93 @@ export async function resolveTopic(
     description: best.description,
     titles: sitelinkMap[best.qid] ?? {},
     candidates: close.length > 1 ? close : [],
+    others: candidates
+      .filter((candidate) => candidate.qid !== best.qid)
+      .map((candidate) => ({ ...candidate, titles: sitelinkMap[candidate.qid] ?? {} })),
+    matchedBy: 'wikidata',
   };
+}
+
+interface ArticleEntitiesResponse {
+  entities?: Record<
+    string,
+    {
+      id?: string;
+      labels?: Record<string, { value?: string }>;
+      descriptions?: Record<string, { value?: string }>;
+      sitelinks?: Record<string, { site?: string; title?: string }>;
+    }
+  >;
+}
+
+export async function resolveByArticleSearch(
+  query: string,
+  sourceLang: string,
+  opts: RequestOptions = {},
+): Promise<TopicResolution | null> {
+  const found = await searchArticles(sourceLang, query, INSPECT_LIMIT, opts);
+  if (found.hits.length === 0) {
+    return null;
+  }
+
+  const site = `${sourceLang.replace(/-/g, '_')}wiki`;
+  const url = `${API}?${new URLSearchParams({
+    action: 'wbgetentities',
+    sites: site,
+    titles: found.hits.map((hit) => hit.title).join('|'),
+    props: 'labels|descriptions|sitelinks',
+    languages: sourceLang,
+    format: 'json',
+    formatversion: '2',
+  }).toString()}`;
+
+  const payload = await requestJson<ArticleEntitiesResponse>(url, opts);
+  const entities = Object.values(payload.entities ?? {}).filter(
+    (entity): entity is typeof entity & { id: string } => typeof entity.id === 'string' && /^Q\d+$/.test(entity.id),
+  );
+  const byTitle = new Map(entities.map((entity) => [entity.sitelinks?.[site]?.title ?? '', entity]));
+
+  const candidates: TopicCandidate[] = [];
+  const titles: Record<string, Record<Lang, string>> = {};
+  for (const hit of found.hits) {
+    const entity = byTitle.get(hit.title);
+    if (!entity || titles[entity.id]) {
+      continue;
+    }
+    titles[entity.id] = sitelinksToTitles(entity.sitelinks ?? {});
+    candidates.push({
+      qid: entity.id,
+      label: entity.labels?.[sourceLang]?.value ?? hit.title,
+      description: entity.descriptions?.[sourceLang]?.value ?? '',
+      score: 0,
+      wikiCount: Object.keys(titles[entity.id] ?? {}).length,
+    });
+  }
+
+  const first = candidates[0];
+  if (!first) {
+    return null;
+  }
+
+  return {
+    qid: first.qid,
+    label: first.label,
+    description: first.description,
+    titles: titles[first.qid] ?? {},
+    candidates,
+    others: candidates.slice(1).map((candidate) => ({ ...candidate, titles: titles[candidate.qid] ?? {} })),
+    matchedBy: 'article_search',
+  };
+}
+
+const DISAMBIGUATION_TITLE = /\((disambiguation|значення|значения|ujednoznacznienie|rozcestník|begriffsklärung|homonymie|desambiguación)\)$/i;
+const DISAMBIGUATION_DESCRIPTION = /disambiguation|сторінка значень|страница значений|strona ujednoznaczniająca/i;
+
+export function isDisambiguation(candidate: TopicCandidate, titles: Record<Lang, string>): boolean {
+  return (
+    DISAMBIGUATION_DESCRIPTION.test(candidate.description) ||
+    Object.values(titles).some((title) => DISAMBIGUATION_TITLE.test(title))
+  );
 }
 
 export function titleSimilarity(query: string, title: string): number {
@@ -362,4 +457,52 @@ export async function probeLanguages(
   }
 
   return results;
+}
+
+export const MAX_HISTORY_PAGES = 20;
+
+export interface RevisionComment {
+  timestamp: string;
+  comment: string;
+}
+
+interface RevisionsResponse {
+  continue?: { rvcontinue?: string };
+  query?: { pages?: Array<{ revisions?: Array<{ timestamp?: string; comment?: string }> }> };
+}
+
+export async function getRevisionComments(qid: string, since: string, opts: RequestOptions = {}): Promise<RevisionComment[]> {
+  const comments: RevisionComment[] = [];
+  let next: string | undefined;
+
+  for (let page = 0; page < MAX_HISTORY_PAGES; page += 1) {
+    const params = new URLSearchParams({
+      action: 'query',
+      prop: 'revisions',
+      titles: qid,
+      rvprop: 'timestamp|comment',
+      rvlimit: '500',
+      format: 'json',
+      formatversion: '2',
+    });
+
+    if (next) {
+      params.set('rvcontinue', next);
+    }
+
+    const payload = await requestJson<RevisionsResponse>(`${API}?${params.toString()}`, opts);
+    const batch = (payload.query?.pages?.[0]?.revisions ?? []).map((revision) => ({
+      timestamp: revision.timestamp ?? '',
+      comment: revision.comment ?? '',
+    }));
+
+    comments.push(...batch);
+    next = payload.continue?.rvcontinue;
+
+    if (!next || (batch.at(-1)?.timestamp ?? '') < since) {
+      break;
+    }
+  }
+
+  return comments;
 }

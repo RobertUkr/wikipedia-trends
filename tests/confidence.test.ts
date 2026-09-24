@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { WEIGHTS, assessConfidence, subsampleSlopes } from '../src/lib/confidence.js';
+import { WEIGHTS, assessConfidence, levelFromScore, subsampleSlopes } from '../src/lib/confidence.js';
 import type { ConfidenceInput } from '../src/lib/confidence.js';
 import type { Message } from '../src/types.js';
 
@@ -31,6 +31,15 @@ function input(overrides: Partial<ConfidenceInput> = {}): ConfidenceInput {
     ...overrides,
   };
 }
+
+describe('levelFromScore', () => {
+  it('maps the weighted score to a level at 0.45 and 0.7', () => {
+    expect(levelFromScore(0.44)).toBe('low');
+    expect(levelFromScore(0.45)).toBe('medium');
+    expect(levelFromScore(0.69)).toBe('medium');
+    expect(levelFromScore(0.7)).toBe('high');
+  });
+});
 
 describe('weights', () => {
   it('sum to one so the score stays on a 0..1 scale', () => {
@@ -95,11 +104,39 @@ describe('stability', () => {
     expect(report.overall).not.toBe('high');
   });
 
+  it('counts the flipped subsamples out of those a short series actually yields', () => {
+    const values = [1, 5, 9, 8, 7, 6];
+    const report = assessConfidence(input({ values, ci95: [0.01, 0.05] }));
+    const caveat = report.caveats.find((item) => item.code === 'SLOPE_SIGN_UNSTABLE');
+
+    expect(subsampleSlopes(values)).toHaveLength(2);
+    expect(caveat?.params).toEqual({ flipped: 1, total: 2 });
+  });
+
+  it('says nothing about sign flips when the series is too short to split', () => {
+    const report = assessConfidence(input({ values: [1, 2, 3, 4], ci95: [0.01, 0.05] }));
+
+    expect(report.components.stability.detail.code).toBe('DETAIL_STABILITY_TOO_SHORT');
+    expect(codes(report.caveats)).not.toContain('SLOPE_SIGN_UNSTABLE');
+  });
+
   it('does not punish a flat series whose interval already spans zero', () => {
     const report = assessConfidence(input({ values: zigzag(730), ci95: [-0.02, 0.03] }));
 
     expect(report.components.stability.score).toBe(1);
     expect(codes(report.caveats)).toContain('INTERVAL_SPANS_ZERO');
+  });
+
+  it('does not call a stable trend directionless when its interval sits inside the flat band', () => {
+    const report = assessConfidence(
+      input({
+        values: zigzag(730),
+        ci95: [-0.02, 0.03],
+        trends: { absolutePercent: -0.6, absoluteCi: [-3.6, 2.4], relativePercent: -0.6, relativeCi: [-3.6, 2.4] },
+      }),
+    );
+
+    expect(codes(report.caveats)).not.toContain('INTERVAL_SPANS_ZERO');
   });
 });
 
@@ -124,11 +161,11 @@ describe('continuity', () => {
     expect(codes(report.caveats)).toContain('LONG_GAP_POSSIBLE_RENAME');
   });
 
-  it('mentions short gaps without the rename warning', () => {
-    const report = assessConfidence(input({ missingDays: 3, longestGapDays: 2 }));
+  it('reports zero-view days as zeros, not as gaps, and without the rename warning', () => {
+    const report = assessConfidence(input({ missingDays: 0, longestGapDays: 0, zeroDays: 40 }));
 
-    expect(report.components.continuity.score).toBeGreaterThan(0.9);
-    expect(codes(report.caveats)).toContain('GAPS_INTERPOLATED');
+    expect(report.components.continuity.score).toBe(1);
+    expect(codes(report.caveats)).toContain('ZERO_VIEW_DAYS');
     expect(codes(report.caveats)).not.toContain('LONG_GAP_POSSIBLE_RENAME');
   });
 });
@@ -152,7 +189,7 @@ describe('two trends', () => {
   it('explains the difference between raw views and share of edition traffic', () => {
     const report = assessConfidence(
       input({
-        trends: { absolutePercent: -12.6, absoluteCi: [-16.4, -8.5], relativePercent: -7.7, relativeCi: [-11.7, -3.5] },
+        trends: { absolutePercent: -12.6, absoluteCi: [-16.4, -8.5], relativePercent: -7.7, relativeCi: [-19.7, 4.5] },
       }),
     );
 

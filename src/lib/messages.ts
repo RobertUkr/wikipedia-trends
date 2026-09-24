@@ -29,9 +29,13 @@ const EN: Record<MessageCode, string> = {
   RECOMMEND_NONE_LOW_CONFIDENCE:
     'Recommendation: interest grows only where confidence is low ({langs}), so no language can be recommended on ' +
     'this evidence.',
+  RECOMMEND_ORDER:
+    'What to check next, most promising first: {order}. Criterion: growth 50%, level of attention (per million ' +
+    'edition views) 30%, confidence 20% — relative to these languages only.',
   RECOMMEND_NONE_NO_DIRECTION:
     'Recommendation: no language shows growing interest, so no language can be recommended on this evidence.',
   RESEARCH_CANDIDATE: '{qid}: {label} — {description}',
+  RESEARCH_CANDIDATE_COVERAGE: '(articles in {langs} of {requested})',
   DIRECTION_UP: 'growing',
   DIRECTION_DOWN: 'declining',
   DIRECTION_FLAT: 'stable',
@@ -40,26 +44,29 @@ const EN: Record<MessageCode, string> = {
   CONFIDENCE_MEDIUM: 'medium',
   CONFIDENCE_HIGH: 'high',
   HEADLINE_SINGLE:
-    'Interest in {topic} ({lang}): {direction} over the period ({percent}%/year, 95% [{low}; {high}]), {recent} in ' +
-    'recent weeks ({recentPercent}%/year); confidence {confidence}.',
+    'Interest in {topic} ({lang}): {direction} over the period ({percent}%/year, 95% [{low}; {high}]), {recent} ' +
+    'since {since} ({recentPercent}%/year); confidence {confidence}.',
   HEADLINE_GROWING:
     'Interest in {topic} is growing in {langs}; {leader} leads at {percent}%/year relative to edition traffic, ' +
-    '{recent} in recent weeks, confidence {confidence}.',
+    '{recent} since {since}, confidence {confidence}.',
   HEADLINE_ALL_DOWN:
     'Interest in {topic} is declining in every compared language ({langs}); {leader} declines slowest at ' +
-    '{percent}%/year, {recent} in recent weeks.',
+    '{percent}%/year, {recent} since {since}.',
   HEADLINE_NO_CLEAR_DIRECTION:
     'The data shows no clear direction of interest in {topic} across {langs}, so no language can be recommended on ' +
     'this evidence.',
   HEADLINE_MIXED_DOWN: 'Interest in {topic} is declining in {down}; in {others} there is no clear change.',
   RESEARCH_LANGUAGE_LINE:
-    '{lang}: {direction} ({percent}%/yr, 95% [{low}; {high}]); recent weeks: {recent} ({recentPercent}%/yr); ' +
-    'confidence {confidence}',
-  RESEARCH_NEEDS_CHOICE:
-    '"{topic}" matches several Wikidata items. Ask the user which one is meant, then rerun research with --qid.',
+    '{lang}: {direction} ({percent}%/yr, 95% [{low}; {high}]); since {since}: {recent} ({recentPercent}%/yr); ' +
+    '{level} per million edition views; confidence {confidence}',
+  RESEARCH_NEEDS_CHOICE: '"{topic}" can mean several things. Which one should be analysed?',
+  RESEARCH_SEARCH_MATCHES:
+    '"{topic}" is not the name of a Wikipedia article. These {lang}.wikipedia articles match it best — which one ' +
+    'should be analysed?',
   RESEARCH_NO_ARTICLES: 'None of the requested language editions ({langs}) has an article about "{topic}".',
   RESEARCH_UNAVAILABLE_TITLE: 'Languages without data',
   RESEARCH_REPORT_LINE: 'PDF report: {path}',
+  RESEARCH_REPORT_LINE_LANGS: 'PDF report, all editions studied for this topic ({langs}): {path}',
   RESEARCH_MORE_CAVEATS: '{count} more caveat(s) are in the PDF.',
   REPORT_SUBTITLE: 'Languages: {langs} · {from} — {to}',
   REPORT_TABLE_LANG: 'Language',
@@ -79,6 +86,9 @@ const EN: Record<MessageCode, string> = {
   REPORT_FOOTER_RANGE: 'Range {from} — {to} ({days} days)',
   REPORT_FOOTER_MISSING: 'Missing days, interpolated: {detail}',
   REPORT_FOOTER_NO_MISSING: 'No missing days.',
+  REPORT_FOOTER_ZERO_DAYS: 'Days with zero views, counted as 0: {detail}',
+  REPORT_CONFIDENCE_CELL: '{level} ({score})',
+  REPORT_CONFIDENCE_CAPPED: '{level} (lowered)',
   CHART_Y_LABEL: 'views per million of edition traffic',
   CHART_LEGEND_RAW: 'daily',
   CHART_LEGEND_SMOOTHED: '7-day average',
@@ -100,7 +110,13 @@ const EN: Record<MessageCode, string> = {
   LONG_GAP_POSSIBLE_RENAME:
     'Data is missing for up to {days} days in a row. Besides an API gap this can mean the article was renamed, ' +
     'split or merged, which breaks the comparison.',
-  GAPS_INTERPOLATED: '{days} day(s) are missing from the API response and were interpolated.',
+  TITLE_HISTORY_MERGED:
+    'The article was renamed during the period ({titles}); views of each title are taken for the time it named ' +
+    'this article.',
+  ZERO_VIEW_DAYS: '{days} day(s) had no views at all; the API omits such days and they count as zero.',
+  SHORT_HISTORY:
+    'data under «{title}» exists only from {first} to {last}: the article was probably renamed, created or merged, so ' +
+    'its trend over the period cannot be measured',
   RAW_COUNTS_NOT_COMPARABLE:
     'Project totals were unavailable, so the series is raw view counts. Values are not comparable across editions.',
   WEEKLY_AGGREGATION:
@@ -181,9 +197,13 @@ const UK: Record<MessageCode, string> = {
   RECOMMEND_NONE_LOW_CONFIDENCE:
     'Рекомендація: інтерес зростає лише там, де достовірність низька ({langs}), тож рекомендувати мову на цій ' +
     'підставі не можна.',
+  RECOMMEND_ORDER:
+    'Кого перевіряти далі, від найперспективнішого: {order}. Критерій: зростання 50%, рівень уваги (на млн переглядів ' +
+    'розділу) 30%, достовірність 20% — лише відносно цих мов.',
   RECOMMEND_NONE_NO_DIRECTION:
     'Рекомендація: жодна мова не показує зростання інтересу, тож рекомендувати мову на цій підставі не можна.',
   RESEARCH_CANDIDATE: '{qid}: {label} — {description}',
+  RESEARCH_CANDIDATE_COVERAGE: '(статті є в: {langs}; із запитаних {requested})',
   DIRECTION_UP: 'зростає',
   DIRECTION_DOWN: 'падає',
   DIRECTION_FLAT: 'стабільний',
@@ -192,27 +212,29 @@ const UK: Record<MessageCode, string> = {
   CONFIDENCE_MEDIUM: 'середня',
   CONFIDENCE_HIGH: 'висока',
   HEADLINE_SINGLE:
-    'Інтерес до «{topic}» ({lang}): за період — {direction} ({percent}%/рік, 95% [{low}; {high}]), в останні ' +
-    'тижні — {recent} ({recentPercent}%/рік); достовірність — {confidence}.',
+    'Інтерес до «{topic}» ({lang}): за період — {direction} ({percent}%/рік, 95% [{low}; {high}]), з {since} — ' +
+    '{recent} ({recentPercent}%/рік); достовірність — {confidence}.',
   HEADLINE_GROWING:
     'Інтерес до «{topic}» зростає в: {langs}; лідер — {leader}, {percent}%/рік відносно трафіку розділу, ' +
-    'в останні тижні — {recent}, достовірність — {confidence}.',
+    'з {since} — {recent}, достовірність — {confidence}.',
   HEADLINE_ALL_DOWN:
     'Інтерес до «{topic}» падає в усіх порівнюваних мовах ({langs}); найповільніше — {leader}, {percent}%/рік, ' +
-    'в останні тижні — {recent}.',
+    'з {since} — {recent}.',
   HEADLINE_NO_CLEAR_DIRECTION:
     'Дані не показують ясного напрямку інтересу до «{topic}» у мовах {langs}, тож жодну мову на цій підставі ' +
     'рекомендувати не можна.',
   HEADLINE_MIXED_DOWN: 'Інтерес до «{topic}» падає в: {down}; у {others} явної зміни немає.',
   RESEARCH_LANGUAGE_LINE:
-    '{lang}: {direction} ({percent}%/рік, 95% [{low}; {high}]); останні тижні — {recent} ({recentPercent}%/рік); ' +
-    'достовірність — {confidence}',
-  RESEARCH_NEEDS_CHOICE:
-    '«{topic}» відповідає кільком обʼєктам Wikidata. Спитайте користувача, який саме мається на увазі, і повторіть ' +
-    'research з --qid.',
+    '{lang}: {direction} ({percent}%/рік, 95% [{low}; {high}]); з {since} — {recent} ({recentPercent}%/рік); ' +
+    '{level} на млн переглядів розділу; достовірність — {confidence}',
+  RESEARCH_NEEDS_CHOICE: '«{topic}» може означати кілька різних тем. Яку з них аналізувати?',
+  RESEARCH_SEARCH_MATCHES:
+    '«{topic}» — не назва статті у Вікіпедії. Ось статті {lang}.wikipedia, які найкраще відповідають запиту, — яку з ' +
+    'них аналізувати?',
   RESEARCH_NO_ARTICLES: 'Жоден із запитаних мовних розділів ({langs}) не має статті про «{topic}».',
   RESEARCH_UNAVAILABLE_TITLE: 'Мови без даних',
   RESEARCH_REPORT_LINE: 'PDF-звіт: {path}',
+  RESEARCH_REPORT_LINE_LANGS: 'PDF-звіт, усі розділи, які досліджували для цієї теми ({langs}): {path}',
   RESEARCH_MORE_CAVEATS: 'Решта застережень ({count}) — у PDF.',
   REPORT_SUBTITLE: 'Мови: {langs} · {from} — {to}',
   REPORT_TABLE_LANG: 'Мова',
@@ -232,6 +254,9 @@ const UK: Record<MessageCode, string> = {
   REPORT_FOOTER_RANGE: 'Діапазон {from} — {to} ({days} днів)',
   REPORT_FOOTER_MISSING: 'Пропущені дні, інтерпольовано: {detail}',
   REPORT_FOOTER_NO_MISSING: 'Пропущених днів немає.',
+  REPORT_FOOTER_ZERO_DAYS: 'Дні без переглядів, враховано як 0: {detail}',
+  REPORT_CONFIDENCE_CELL: '{level} ({score})',
+  REPORT_CONFIDENCE_CAPPED: '{level} (знижено)',
   CHART_Y_LABEL: 'перегляди на мільйон трафіку розділу',
   CHART_LEGEND_RAW: 'щоденно',
   CHART_LEGEND_SMOOTHED: 'середнє за 7 днів',
@@ -253,7 +278,13 @@ const UK: Record<MessageCode, string> = {
   LONG_GAP_POSSIBLE_RENAME:
     'Дані відсутні до {days} днів поспіль. Крім прогалини в API це може означати, що статтю перейменували, ' +
     'розділили або обʼєднали — тоді порівняння ламається.',
-  GAPS_INTERPOLATED: '{days} дн. відсутні у відповіді API та були інтерпольовані.',
+  TITLE_HISTORY_MERGED:
+    'Статтю за період перейменовували ({titles}); перегляди кожної назви взято лише за час, коли вона була ' +
+    'назвою цієї статті.',
+  ZERO_VIEW_DAYS: '{days} дн. без жодного перегляду: API таких днів не повертає, вони враховані як нуль.',
+  SHORT_HISTORY:
+    'дані під назвою «{title}» є лише з {first} по {last}: статтю, ймовірно, перейменували, створили чи обʼєднали, ' +
+    'тож тренд за період виміряти не можна',
   RAW_COUNTS_NOT_COMPARABLE:
     'Загальний трафік розділу недоступний, тому ряд — сирі перегляди. Значення непорівнянні між розділами.',
   WEEKLY_AGGREGATION:

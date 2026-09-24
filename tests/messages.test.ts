@@ -49,7 +49,7 @@ describe('render', () => {
   });
 
   it('leaves a placeholder visible when the parameter is missing instead of printing undefined', () => {
-    expect(render({ code: 'GAPS_INTERPOLATED', params: {} }, 'en')).toContain('{days}');
+    expect(render({ code: 'ZERO_VIEW_DAYS', params: {} }, 'en')).toContain('{days}');
   });
 
   it('renders a whole list', () => {

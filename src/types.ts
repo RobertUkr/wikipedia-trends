@@ -18,6 +18,8 @@ export interface TopicResolution {
   description: string;
   titles: Record<Lang, string>;
   candidates: TopicCandidate[];
+  others: Array<TopicCandidate & { titles: Record<Lang, string> }>;
+  matchedBy: 'wikidata' | 'article_search';
 }
 
 export interface DailyPoint {
@@ -50,7 +52,9 @@ export type MessageCode =
   | 'SLOPE_SIGN_UNSTABLE'
   | 'SPIKES_EXCLUDED'
   | 'LONG_GAP_POSSIBLE_RENAME'
-  | 'GAPS_INTERPOLATED'
+  | 'ZERO_VIEW_DAYS'
+  | 'SHORT_HISTORY'
+  | 'TITLE_HISTORY_MERGED'
   | 'RAW_COUNTS_NOT_COMPARABLE'
   | 'WEEKLY_AGGREGATION'
   | 'ABSOLUTE_VS_RELATIVE'
@@ -99,9 +103,11 @@ export type MessageCode =
   | 'HEADLINE_MIXED_DOWN'
   | 'RESEARCH_LANGUAGE_LINE'
   | 'RESEARCH_NEEDS_CHOICE'
+  | 'RESEARCH_SEARCH_MATCHES'
   | 'RESEARCH_NO_ARTICLES'
   | 'RESEARCH_UNAVAILABLE_TITLE'
   | 'RESEARCH_REPORT_LINE'
+  | 'RESEARCH_REPORT_LINE_LANGS'
   | 'RESEARCH_MORE_CAVEATS'
   | 'TRUST_LOW'
   | 'TRUST_MEDIUM'
@@ -112,10 +118,12 @@ export type MessageCode =
   | 'COMPONENT_OUTLIERS'
   | 'COMPONENT_CONTINUITY'
   | 'RECOMMEND_LANGUAGE'
+  | 'RECOMMEND_ORDER'
   | 'RECOMMEND_NONE_ALL_DOWN'
   | 'RECOMMEND_NONE_LOW_CONFIDENCE'
   | 'RECOMMEND_NONE_NO_DIRECTION'
   | 'RESEARCH_CANDIDATE'
+  | 'RESEARCH_CANDIDATE_COVERAGE'
   | 'REPORT_SUBTITLE'
   | 'REPORT_TABLE_LANG'
   | 'REPORT_TABLE_RELATIVE'
@@ -133,6 +141,9 @@ export type MessageCode =
   | 'REPORT_FOOTER_RANGE'
   | 'REPORT_FOOTER_MISSING'
   | 'REPORT_FOOTER_NO_MISSING'
+  | 'REPORT_FOOTER_ZERO_DAYS'
+  | 'REPORT_CONFIDENCE_CELL'
+  | 'REPORT_CONFIDENCE_CAPPED'
   | 'CHART_Y_LABEL'
   | 'CHART_LEGEND_RAW'
   | 'CHART_LEGEND_SMOOTHED'
@@ -163,6 +174,7 @@ export interface ArticleSearchResult {
 
 export type LanguageStatus =
   | 'available'
+  | 'short_history'
   | 'no_article'
   | 'possible_alternative'
   | 'no_data'
@@ -192,6 +204,7 @@ export type ErrorCode =
   | 'InvalidInput'
   | 'TopicNotFound'
   | 'ArticleNotFound'
+  | 'ShortHistory'
   | 'NoSitelink'
   | 'HttpError'
   | 'NetworkError';

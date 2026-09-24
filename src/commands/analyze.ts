@@ -5,7 +5,7 @@ import { assessConfidence } from '../lib/confidence.js';
 import type { ConfidenceReport } from '../lib/confidence.js';
 import { renderAll } from '../lib/messages.js';
 import type { Locale } from '../lib/messages.js';
-import { aggregateWeekly, interpolate, normalizeSeries } from '../lib/normalize.js';
+import { aggregateWeekly, enumerateDates, interpolate, mergeSeries, normalizeSeries } from '../lib/normalize.js';
 import type { NormalizedSeries, Unit, WeeklySeries } from '../lib/normalize.js';
 import {
   WEEKS_PER_YEAR,
@@ -21,13 +21,19 @@ import {
 import type { Direction, SeasonalityResult, Summary, TrendFit, TrendPercent, YoyResult } from '../lib/stats.js';
 import type { ReversalInput } from '../lib/confidence.js';
 import { getSitelinks } from '../lib/wikidata.js';
-import { normalizeProject } from '../lib/wikimedia.js';
-import { SkillError } from '../types.js';
-import type { Lang, Message } from '../types.js';
-import { loadSeries, loadTotals } from './fetch.js';
+import { getMovesFrom, getRedirectsTo, normalizeProject } from '../lib/wikimedia.js';
+import { parseSitelinkEvent, titleWindows } from '../lib/history.js';
+import type { SitelinkEvent } from '../lib/history.js';
+import type { RevisionComment } from '../lib/wikidata.js';
+import { ArticleNotFound, SkillError } from '../types.js';
+import type { DailyPoint, Lang, Message } from '../types.js';
+import { loadRevisionComments, loadSeries, loadTotals } from './fetch.js';
 
 export const MIN_ANALYSIS_DAYS = 30;
-export const ARTIFACT_SCHEMA = 4;
+export const ARTIFACT_SCHEMA = 5;
+export const MAX_EDGE_GAP_DAYS = 90;
+export const MAX_MOVE_LOOKUPS = 5;
+export const MAX_RENAME_LAG_DAYS = 30;
 export const MIN_RECENT_WEEKS = 4;
 
 export interface TrendReport {
@@ -133,7 +139,61 @@ export async function analyzeLanguage(
   noCache: boolean,
 ): Promise<LanguageAnalysis> {
   const project = normalizeProject(lang);
-  const { views } = await loadSeries(project, title, from, to, noCache);
+  const site = `${lang.replace(/-/g, '_')}wiki`;
+  const history = await loadRevisionComments(qid, from, noCache).catch(() => [] as RevisionComment[]);
+  const events = history
+    .map((revision) => parseSitelinkEvent(revision.comment, revision.timestamp, site))
+    .filter((event): event is SitelinkEvent => event !== null);
+  const firstSet = events.filter((event) => event.kind === 'set').sort((a, b) => a.at.localeCompare(b.at))[0];
+
+  if (firstSet && firstSet.previous === null && firstSet.title && firstSet.date > from) {
+    const renamedAt = Date.parse(firstSet.at);
+    const redirects = (await getRedirectsTo(project, firstSet.title).catch(() => []))
+      .sort((a, b) => Math.abs(Date.parse(a.lastEdited) - renamedAt) - Math.abs(Date.parse(b.lastEdited) - renamedAt))
+      .map((redirect) => redirect.title);
+    const seen = [...new Set([...events.map((event) => event.title), ...redirects].filter((value): value is string => !!value))];
+
+    const earliest = new Date(renamedAt - MAX_RENAME_LAG_DAYS * 86400000).toISOString().slice(0, 10);
+
+    for (const candidate of seen.filter((value) => value !== firstSet.title).slice(0, MAX_MOVE_LOOKUPS)) {
+      const moves = await getMovesFrom(project, candidate).catch(() => []);
+      const move = moves
+        .filter((item) => item.to === firstSet.title && item.date <= firstSet.date && item.date >= earliest)
+        .sort((a, b) => b.date.localeCompare(a.date))[0];
+
+      if (move) {
+        firstSet.previous = candidate;
+        firstSet.date = move.date;
+        break;
+      }
+    }
+  }
+
+  const windows = titleWindows(events, title, from, to);
+  const parts: DailyPoint[][] = [];
+  const unknownDays = new Set<string>();
+
+  for (const window of windows) {
+    try {
+      parts.push((await loadSeries(project, window.title, window.from, window.to, noCache)).views.points);
+    } catch (error) {
+      if (!(error instanceof ArticleNotFound)) {
+        throw error;
+      }
+
+      for (const date of enumerateDates(window.from, window.to)) {
+        unknownDays.add(date);
+      }
+    }
+  }
+
+  const merged = mergeSeries(parts);
+
+  if (merged.length === 0) {
+    throw new ArticleNotFound(project, title, from, to);
+  }
+
+  const formerTitles = [...new Set(windows.map((window) => window.title))];
 
   let totalsPoints: Array<{ date: string; views: number }> = [];
   let totalsAvailable = true;
@@ -145,7 +205,19 @@ export async function analyzeLanguage(
     totalsAvailable = false;
   }
 
-  const series = normalizeSeries(views.points, totalsPoints, from, to);
+  const edgeGap = (value: NormalizedSeries) => Math.max(value.leadingGapDays, value.trailingGapDays);
+  const series = normalizeSeries(merged, totalsPoints, from, to, unknownDays);
+
+  if (edgeGap(series) > MAX_EDGE_GAP_DAYS) {
+    const first = series.dates[series.leadingGapDays] ?? to;
+    const last = series.dates[series.dates.length - 1 - series.trailingGapDays] ?? from;
+
+    throw new SkillError(
+      'ShortHistory',
+      `${project} has data for "${title}" only from ${first} to ${last}; the article was probably renamed, created or merged`,
+      { project, title, first, last },
+    );
+  }
 
   if (series.values.length < MIN_ANALYSIS_DAYS) {
     throw new SkillError(
@@ -175,9 +247,9 @@ export async function analyzeLanguage(
 
   const normalized = series.unit === 'views_per_million';
   const absoluteFit = theilSen(toPoints(weeklyAbsolute.values));
-  const absoluteTrend = trendPercentPerYear(absoluteFit, weeklyAbsolute.values, WEEKS_PER_YEAR);
+  const absoluteTrend = trendPercentPerYear(weeklyAbsolute.values, WEEKS_PER_YEAR);
   const relativeFit = normalized ? theilSen(toPoints(weekly.values)) : null;
-  const relativeTrend = relativeFit ? trendPercentPerYear(relativeFit, weekly.values, WEEKS_PER_YEAR) : null;
+  const relativeTrend = relativeFit ? trendPercentPerYear(weekly.values, WEEKS_PER_YEAR) : null;
 
   const fit = relativeFit ?? absoluteFit;
   const trend = relativeTrend ?? absoluteTrend;
@@ -186,7 +258,7 @@ export async function analyzeLanguage(
   const recentStart = Math.floor((primaryWeekly.values.length * 2) / 3);
   const recentValues = primaryWeekly.values.slice(recentStart);
   const recentFit = recentValues.length >= MIN_RECENT_WEEKS ? theilSen(toPoints(recentValues)) : null;
-  const recentTrend = recentFit ? trendPercentPerYear(recentFit, recentValues, WEEKS_PER_YEAR) : null;
+  const recentTrend = recentFit ? trendPercentPerYear(recentValues, WEEKS_PER_YEAR) : null;
 
   const reversal =
     recentFit !== null &&
@@ -214,6 +286,8 @@ export async function analyzeLanguage(
     rangeDays: series.values.length,
     missingDays: series.missingDays,
     longestGapDays: series.longestGapDays,
+    zeroDays: series.zeroDays,
+    formerTitles: formerTitles.length > 1 ? formerTitles : [],
     outlierDays: outlierIndices.length,
     ci95: fit.ci95,
     normalized,
@@ -280,7 +354,7 @@ export async function runAnalyze(args: AnalyzeArgs): Promise<AnalyzeOutput> {
 
   const dir = outputDir();
   await mkdir(dir, { recursive: true });
-  const file = args.out ?? join(dir, `analyze-${args.qid}-${args.lang}-${args.from}_${args.to}.json`);
+  const file = args.out ?? join(dir, `analyze-${args.qid}-${args.lang}.json`);
 
   await writeFile(
     file,
@@ -328,6 +402,7 @@ export async function runAnalyze(args: AnalyzeArgs): Promise<AnalyzeOutput> {
         confidence: analysis.confidence,
         coverage: {
           missingDays: analysis.series.missingDays,
+          zeroDays: analysis.series.zeroDays,
           longestGapDays: analysis.series.longestGapDays,
           totalsCoverage: analysis.series.totalsCoverage,
         },

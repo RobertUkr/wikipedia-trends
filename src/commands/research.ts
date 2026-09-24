@@ -1,8 +1,11 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { outputDir } from '../lib/cache.js';
 import { render } from '../lib/messages.js';
 import type { Locale } from '../lib/messages.js';
-import { confidenceMessage, directionMessage, selectCaveats, signed, verdictLines } from '../lib/report.js';
+import { MAX_REPORT_LANGS, confidenceMessage, directionMessage, headline, selectCaveats, signed, verdictLines } from '../lib/report.js';
 import type { ReportLanguage } from '../lib/report.js';
+import { getLabels } from '../lib/wikidata.js';
 import { toApiDate } from '../lib/wikimedia.js';
 import { SkillError } from '../types.js';
 import type { Lang, LanguageAvailability } from '../types.js';
@@ -52,6 +55,7 @@ export type ResearchOutput =
       range: { from: string; to: string };
       locale: Locale;
       headline: string;
+      reportLangs: Lang[];
       summary: string;
       languages: ResearchLanguage[];
       unavailable: Array<{ lang: Lang; status: string; reason: string }>;
@@ -67,7 +71,7 @@ export type ResearchOutput =
       topic: string;
       message: string;
       summary: string;
-      candidates: Array<{ qid: string; label: string; description: string }>;
+      candidates: Array<{ qid: string; label: string; description: string; langs: Lang[] }>;
       unavailable: Array<{ lang: Lang; status: string; reason: string }>;
     };
 
@@ -90,6 +94,7 @@ export function buildSummary(parts: {
   moreCaveats: number;
   unavailable: Array<{ lang: Lang; reason: string }>;
   report: string;
+  reportLangs?: Lang[];
   locale: Locale;
 }): string {
   const t = (code: 'REPORT_CAVEATS_TITLE' | 'RESEARCH_UNAVAILABLE_TITLE', params = {}) =>
@@ -112,9 +117,41 @@ export function buildSummary(parts: {
     lines.push('', `**${t('RESEARCH_UNAVAILABLE_TITLE')}**`, ...parts.unavailable.map((item) => `- ${item.lang}: ${item.reason}`));
   }
 
-  lines.push('', render({ code: 'RESEARCH_REPORT_LINE', params: { path: parts.report } }, parts.locale));
+  const reportLangs = parts.reportLangs ?? [];
+  const wider = reportLangs.some((lang) => !parts.languages.some((item) => item.lang === lang));
+
+  lines.push(
+    '',
+    wider
+      ? render({ code: 'RESEARCH_REPORT_LINE_LANGS', params: { path: parts.report, langs: reportLangs.join(', ') } }, parts.locale)
+      : render({ code: 'RESEARCH_REPORT_LINE', params: { path: parts.report } }, parts.locale),
+  );
 
   return lines.join('\n');
+}
+
+function reportLanguagesPath(qid: string): string {
+  return join(outputDir(), `report-langs-${qid}.json`);
+}
+
+export async function reportLanguages(qid: string, langs: Lang[]): Promise<Lang[]> {
+  let previous: Lang[] = [];
+
+  try {
+    const stored = JSON.parse(await readFile(reportLanguagesPath(qid), 'utf8')) as { langs?: unknown };
+    previous = Array.isArray(stored.langs) ? stored.langs.filter((lang): lang is Lang => typeof lang === 'string') : [];
+  } catch {
+    previous = [];
+  }
+
+  const earlier = previous.filter((lang) => !langs.includes(lang));
+  const room = Math.max(0, MAX_REPORT_LANGS - langs.length);
+
+  return [...earlier.slice(Math.max(0, earlier.length - room)), ...langs];
+}
+
+async function saveReportLanguages(qid: string, langs: Lang[]): Promise<void> {
+  await writeFile(reportLanguagesPath(qid), JSON.stringify({ qid, langs }, null, 2), 'utf8');
 }
 
 export function languageLine(item: ReportLanguage, locale: Locale): ResearchLanguage {
@@ -141,7 +178,9 @@ export function languageLine(item: ReportLanguage, locale: Locale): ResearchLang
           low: signed(primary.ci95?.[0] ?? null),
           high: signed(primary.ci95?.[1] ?? null),
           recent: directionMessage(recent?.direction ?? 'inconclusive'),
+          since: recent?.from ?? '—',
           recentPercent: signed(recent?.percentPerYear ?? null),
+          level: Math.round(item.medianPerMillion * 100) / 100,
           confidence: confidenceMessage(item.confidence.overall),
         },
       },
@@ -159,6 +198,15 @@ export async function runResearch(args: ResearchArgs): Promise<ResearchOutput> {
     throw new SkillError('InvalidInput', '--langs is required, e.g. --langs uk,pl');
   }
 
+  if (args.langs.length > MAX_REPORT_LANGS) {
+    throw new SkillError(
+      'InvalidInput',
+      `research compares at most ${MAX_REPORT_LANGS} editions so the report fits one page; got ${args.langs.length}. ` +
+        'Split them into groups and compare the leaders of each group.',
+      { langs: args.langs },
+    );
+  }
+
   const range = args.from && args.to ? { from: args.from, to: args.to } : defaultRange(args.years);
   toApiDate(range.from);
   toApiDate(range.to);
@@ -172,11 +220,13 @@ export async function runResearch(args: ResearchArgs): Promise<ResearchOutput> {
     const resolved = await runResolve({ topic: args.topic as string, lang: args.lang, langs: args.langs });
 
     if (resolved.ambiguous) {
-      const message = render({ code: 'RESEARCH_NEEDS_CHOICE', params: { topic } }, args.locale);
+      const code = resolved.matchedBy === 'article_search' ? 'RESEARCH_SEARCH_MATCHES' : 'RESEARCH_NEEDS_CHOICE';
+      const message = render({ code, params: { topic, lang: args.lang } }, args.locale);
       const candidates = resolved.candidates.map((item) => ({
         qid: item.qid,
         label: item.label,
         description: item.description,
+        langs: item.langs,
       }));
 
       return {
@@ -189,7 +239,21 @@ export async function runResearch(args: ResearchArgs): Promise<ResearchOutput> {
           message,
           '',
           ...candidates.map(
-            (item) => `- ${render({ code: 'RESEARCH_CANDIDATE', params: { ...item } }, args.locale)}`,
+            (item) => {
+              const line = render(
+                { code: 'RESEARCH_CANDIDATE', params: { qid: item.qid, label: item.label, description: item.description } },
+                args.locale,
+              ).replace(/ — $/, '');
+              const coverage = render(
+                {
+                  code: 'RESEARCH_CANDIDATE_COVERAGE',
+                  params: { langs: item.langs.length > 0 ? item.langs.join(', ') : '—', requested: args.langs.join(', ') },
+                },
+                args.locale,
+              );
+
+              return `- ${line} ${coverage}`;
+            },
           ),
         ].join('\n'),
         candidates,
@@ -204,7 +268,7 @@ export async function runResearch(args: ResearchArgs): Promise<ResearchOutput> {
     langs = args.langs.filter((lang) => !missing.has(lang));
   }
 
-  if (langs.length === 0) {
+  const noArticles = (): ResearchOutput => {
     const message = render({ code: 'RESEARCH_NO_ARTICLES', params: { topic, langs: args.langs.join(', ') } }, args.locale);
     const missing = describeUnavailable(unavailable, args.locale);
 
@@ -218,36 +282,111 @@ export async function runResearch(args: ResearchArgs): Promise<ResearchOutput> {
       candidates: [],
       unavailable: missing,
     };
+  };
+
+  if (langs.length === 0) {
+    return noArticles();
   }
 
-  const artifact = artifactPath(qid, langs, range.from, range.to);
+  const addUnavailable = (items: LanguageAvailability[]) => {
+    unavailable = [...unavailable, ...items.filter((item) => !unavailable.some((known) => known.lang === item.lang))];
+    const failed = new Set(items.map((item) => item.lang));
+    langs = langs.filter((lang) => !failed.has(lang));
+  };
+
+  let artifact = artifactPath(qid, langs);
+
+  if (langs.length > 1) {
+    try {
+      const compared = await runCompare({
+        qid,
+        langs,
+        from: range.from,
+        to: range.to,
+        noCache: args.noCache,
+        out: artifact,
+        locale: null,
+      });
+      addUnavailable(compared.unavailable);
+    } catch (error) {
+      const failed = error instanceof SkillError ? error.details['unavailable'] : undefined;
+
+      if (!Array.isArray(failed)) {
+        throw error;
+      }
+
+      addUnavailable(failed as LanguageAvailability[]);
+
+      if (langs.length === 0) {
+        return noArticles();
+      }
+
+      artifact = artifactPath(qid, langs);
+    }
+  }
 
   if (langs.length === 1) {
     await runAnalyze({ qid, lang: langs[0] as string, from: range.from, to: range.to, noCache: args.noCache, out: artifact, locale: null });
-  } else {
-    const compared = await runCompare({ qid, langs, from: range.from, to: range.to, noCache: args.noCache, out: artifact, locale: null });
-    unavailable = [...unavailable, ...compared.unavailable.filter((item) => !unavailable.some((known) => known.lang === item.lang))];
-    const failed = new Set(compared.unavailable.map((item) => item.lang));
-    langs = langs.filter((lang) => !failed.has(lang));
+  }
+
+  const labels = await getLabels(qid, [args.locale, 'en']).catch(() => ({}) as Record<Lang, string>);
+  const raw = args.topic?.trim() || labels[args.locale];
+  const label = raw ? raw.charAt(0).toLocaleUpperCase(args.locale) + raw.slice(1) : undefined;
+  const english = labels['en'];
+  const named = { ...(label ? { topic: label } : {}), ...(english ? { fileName: english } : {}) };
+  const missing = describeUnavailable(unavailable, args.locale);
+
+  let reportLangs = await reportLanguages(qid, langs);
+  let reportArtifact = artifact;
+  let reportMissing = missing;
+
+  if (reportLangs.length > langs.length) {
+    try {
+      const union = await runCompare({
+        qid,
+        langs: reportLangs,
+        from: range.from,
+        to: range.to,
+        noCache: args.noCache,
+        out: join(outputDir(), `report-compare-${qid}.json`),
+        locale: null,
+      });
+      const failed = new Set(union.unavailable.map((item) => item.lang));
+      reportLangs = reportLangs.filter((lang) => !failed.has(lang));
+      reportArtifact = union.file;
+      reportMissing = describeUnavailable(
+        [...unavailable, ...union.unavailable.filter((item) => !unavailable.some((known) => known.lang === item.lang))],
+        args.locale,
+      );
+    } catch (error) {
+      if (!(error instanceof SkillError)) {
+        throw error;
+      }
+
+      reportLangs = langs;
+    }
   }
 
   const report = await runReport({
+    ...named,
     qid,
-    langs,
+    langs: reportLangs,
     from: range.from,
     to: range.to,
     locale: args.locale,
-    artifact,
+    artifact: reportArtifact,
     noCache: args.noCache,
+    unavailable: reportMissing,
   });
+  await saveReportLanguages(qid, reportLangs);
 
   const stored = JSON.parse(await readFile(artifact, 'utf8')) as Parameters<typeof toReportInput>[0];
-  const input = toReportInput(stored, langs, args.locale, artifact);
+  const input = toReportInput(stored, langs, args.locale, artifact, label);
+  const answer = render(headline(input), args.locale);
   const allCaveats = selectCaveats(input).map((caveat) => render(caveat, args.locale));
   const caveats = allCaveats.slice(0, MAX_CAVEATS);
   const moreCaveats = Math.max(0, allCaveats.length - MAX_CAVEATS);
   const languages = input.languages.map((item) => languageLine(item, args.locale));
-  const missing = describeUnavailable(unavailable, args.locale);
 
   return {
     ok: true,
@@ -257,15 +396,17 @@ export async function runResearch(args: ResearchArgs): Promise<ResearchOutput> {
     topic: input.topic,
     range,
     locale: args.locale,
-    headline: report.headline,
+    headline: answer,
+    reportLangs,
     summary: buildSummary({
-      headline: report.headline,
+      headline: answer,
       verdicts: verdictLines(input).map((line) => render(line, args.locale)),
       languages,
       caveats,
       moreCaveats,
       unavailable: missing,
       report: report.file,
+      reportLangs,
       locale: args.locale,
     }),
     languages,

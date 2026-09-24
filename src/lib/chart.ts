@@ -2,7 +2,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 export const CHART_WIDTH = 520;
 export const CHART_HEIGHT = 260;
-export const PALETTE = ['#2563eb', '#0d9488', '#7c3aed', '#b45309', '#475569'];
+export const PALETTE = ['#2563eb', '#0d9488', '#7c3aed', '#b45309', '#475569', '#db2777', '#65a30d', '#0891b2'];
 export const OUTLIER_COLOR = '#e11d48';
 export const MARKER_COLOR = '#6b7280';
 export const FONT_FAMILY = 'DejaVuSans';
@@ -96,6 +96,8 @@ export function xDomain(series: ChartSeries[]): Domain {
   return { min, max };
 }
 
+const FLAT_TOLERANCE = 1e-9;
+
 export function yDomain(values: Array<number | null | undefined>): Domain {
   const usable = finite(values);
 
@@ -106,9 +108,9 @@ export function yDomain(values: Array<number | null | undefined>): Domain {
   let min = Math.min(...usable);
   let max = Math.max(...usable);
 
-  if (min === max) {
-    const spread = min === 0 ? 1 : Math.abs(min) * 0.1;
-    min -= spread;
+  if (max - min <= Math.max(Math.abs(min), Math.abs(max)) * FLAT_TOLERANCE) {
+    const spread = max === 0 ? 1 : Math.abs(max) * 0.1;
+    min = max - spread;
     max += spread;
   }
 
@@ -133,14 +135,15 @@ export function niceTicks(domain: Domain, count = 5): Ticks {
     return { min: 0, max: 1, ticks: [0, 1], step: 1 };
   }
 
+  if (span <= Math.max(Math.abs(domain.min), Math.abs(domain.max)) * FLAT_TOLERANCE) {
+    return niceTicks(yDomain([domain.min, domain.max]), count);
+  }
+
   const step = niceStep(span / count);
   const min = Math.floor(domain.min / step) * step;
   const max = Math.ceil(domain.max / step) * step;
-  const ticks: number[] = [];
-
-  for (let value = min; value <= max + step / 2; value += step) {
-    ticks.push(Math.round(value / step) * step);
-  }
+  const intervals = Math.round((max - min) / step);
+  const ticks = Array.from({ length: intervals + 1 }, (_, index) => Math.round(min / step + index) * step);
 
   return { min, max, ticks, step };
 }

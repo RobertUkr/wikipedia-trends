@@ -3,7 +3,8 @@ import { join } from 'node:path';
 import { cacheKey, outputDir, readCache, writeCache } from '../lib/cache.js';
 import { message } from '../lib/messages.js';
 import { enumerateDates } from '../lib/normalize.js';
-import { getSitelinks, probeLanguages } from '../lib/wikidata.js';
+import { getRevisionComments, getSitelinks, probeLanguages } from '../lib/wikidata.js';
+import type { RevisionComment } from '../lib/wikidata.js';
 import { getArticleViews, getProjectTotals, normalizeProject, toApiDate } from '../lib/wikimedia.js';
 import { ACCESS, AGENT, ArticleNotFound, GRANULARITY, SkillError } from '../types.js';
 import type { ArticleViews, DailyPoint, Lang, LanguageAvailability, ProjectTotals } from '../types.js';
@@ -143,6 +144,23 @@ export async function loadTotals(
   await writeCache(key, totals);
 
   return { totals, cached: false };
+}
+
+export async function loadRevisionComments(qid: string, since: string, noCache: boolean): Promise<RevisionComment[]> {
+  const key = cacheKey({ kind: 'sitelink-history', qid, since });
+
+  if (!noCache) {
+    const cached = await readCache<RevisionComment[]>(key);
+
+    if (cached) {
+      return cached;
+    }
+  }
+
+  const comments = await getRevisionComments(qid, since);
+  await writeCache(key, comments);
+
+  return comments;
 }
 
 export async function runFetch(args: FetchArgs): Promise<FetchOutput> {

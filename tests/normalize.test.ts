@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   alignToRange,
+  mergeSeries,
   enumerateDates,
   interpolate,
   movingAverage,
@@ -33,7 +34,21 @@ describe('interpolate', () => {
 });
 
 describe('alignToRange', () => {
-  it('puts the series on a full daily grid and reports the gaps', () => {
+  it('treats days of a title that has no data as missing rather than as zero views', () => {
+    const points: DailyPoint[] = [
+      { date: '2024-01-01', views: 10 },
+      { date: '2024-01-05', views: 50 },
+    ];
+
+    const aligned = alignToRange(points, '2024-01-01', '2024-01-05', new Set(['2024-01-03', '2024-01-04']));
+
+    expect(aligned.values.map((value) => Math.round(value * 100) / 100)).toEqual([10, 0, 16.67, 33.33, 50]);
+    expect(aligned.missingDays).toBe(2);
+    expect(aligned.longestGapDays).toBe(2);
+    expect(aligned.zeroDays).toBe(1);
+  });
+
+  it('counts days the API omits as zero views, because it omits exactly the days nobody read the article', () => {
     const points: DailyPoint[] = [
       { date: '2024-01-01', views: 10 },
       { date: '2024-01-04', views: 40 },
@@ -42,9 +57,27 @@ describe('alignToRange', () => {
     const aligned = alignToRange(points, '2024-01-01', '2024-01-04');
 
     expect(aligned.dates).toEqual(['2024-01-01', '2024-01-02', '2024-01-03', '2024-01-04']);
-    expect(aligned.values).toEqual([10, 20, 30, 40]);
-    expect(aligned.missingDays).toBe(2);
+    expect(aligned.values).toEqual([10, 0, 0, 40]);
+    expect(aligned.zeroDays).toBe(2);
+    expect(aligned.missingDays).toBe(0);
+  });
+
+  it('tells edge gaps apart: no data before a rename or after a move is not zero interest', () => {
+    const points: DailyPoint[] = [{ date: '2024-01-03', views: 5 }, { date: '2024-01-04', views: 7 }];
+
+    const aligned = alignToRange(points, '2024-01-01', '2024-01-06');
+
+    expect(aligned.leadingGapDays).toBe(2);
+    expect(aligned.trailingGapDays).toBe(2);
+    expect(aligned.missingDays).toBe(4);
     expect(aligned.longestGapDays).toBe(2);
+    expect(aligned.zeroDays).toBe(0);
+  });
+
+  it('fills edge gaps from the nearest known day, so a late-created article does not look like growth from zero', () => {
+    const points: DailyPoint[] = [{ date: '2024-01-03', views: 5 }, { date: '2024-01-04', views: 7 }];
+
+    expect(alignToRange(points, '2024-01-01', '2024-01-06').values).toEqual([5, 5, 5, 7, 7, 7]);
   });
 });
 
@@ -106,5 +139,20 @@ describe('normalizeSeries', () => {
     expect(result.points[3]?.raw).toBe(100);
     expect(result.points[3]?.smoothed).toBeLessThan(40);
     expect(result.points).toHaveLength(10);
+  });
+});
+
+describe('mergeSeries', () => {
+  it('adds views of several titles day by day, so a renamed article keeps one series', () => {
+    const merged = mergeSeries([
+      [{ date: '2024-01-02', views: 5 }, { date: '2024-01-03', views: 7 }],
+      [{ date: '2024-01-01', views: 40 }, { date: '2024-01-02', views: 30 }],
+    ]);
+
+    expect(merged).toEqual([
+      { date: '2024-01-01', views: 40 },
+      { date: '2024-01-02', views: 35 },
+      { date: '2024-01-03', views: 7 },
+    ]);
   });
 });

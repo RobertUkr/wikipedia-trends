@@ -22,6 +22,9 @@ export interface AlignedSeries {
   filled: boolean[];
   missingDays: number;
   longestGapDays: number;
+  leadingGapDays: number;
+  trailingGapDays: number;
+  zeroDays: number;
 }
 
 export interface NormalizedPoint {
@@ -42,6 +45,9 @@ export interface NormalizedSeries {
   rawValues: number[];
   missingDays: number;
   longestGapDays: number;
+  leadingGapDays: number;
+  trailingGapDays: number;
+  zeroDays: number;
   filledDays: number;
   totalsCoverage: number;
 }
@@ -97,31 +103,53 @@ export function interpolate(values: Array<number | null>): { values: number[]; f
   return { values: result, filled };
 }
 
-export function alignToRange(points: DailyPoint[], from: string, to: string): AlignedSeries {
+export function mergeSeries(lists: DailyPoint[][]): DailyPoint[] {
+  const sums = new Map<string, number>();
+
+  for (const list of lists) {
+    for (const point of list) {
+      sums.set(point.date, (sums.get(point.date) ?? 0) + point.views);
+    }
+  }
+
+  return [...sums.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([date, views]) => ({ date, views }));
+}
+
+export function alignToRange(
+  points: DailyPoint[],
+  from: string,
+  to: string,
+  unknown: ReadonlySet<string> = new Set(),
+): AlignedSeries {
   const dates = enumerateDates(from, to);
   const known = new Map(points.map((point) => [point.date, point.views]));
-  const sparse = dates.map((date) => known.get(date) ?? null);
-  const { values, filled } = interpolate(sparse);
+  const filled = dates.map((date) => !known.has(date));
+  const leadingGapDays = filled.indexOf(false) === -1 ? dates.length : filled.indexOf(false);
+  const trailingGapDays = filled.lastIndexOf(false) === -1 ? 0 : dates.length - 1 - filled.lastIndexOf(false);
+  const inside = (index: number) => index >= leadingGapDays && index < dates.length - trailingGapDays;
+  const lost = dates.map((date, index) => inside(index) && !known.has(date) && unknown.has(date));
+  const values = interpolate(
+    dates.map((date, index) => known.get(date) ?? (inside(index) && !lost[index] ? 0 : null)),
+  ).values;
+  const absent = filled.filter(Boolean).length;
+  const lostDays = lost.filter(Boolean).length;
+  let longestLost = 0;
+  let run = 0;
 
-  let longestGapDays = 0;
-  let currentGap = 0;
-
-  for (const isFilled of filled) {
-    if (isFilled) {
-      currentGap += 1;
-      longestGapDays = Math.max(longestGapDays, currentGap);
-      continue;
-    }
-
-    currentGap = 0;
+  for (const flag of lost) {
+    run = flag ? run + 1 : 0;
+    longestLost = Math.max(longestLost, run);
   }
 
   return {
     dates,
     values,
     filled,
-    missingDays: filled.filter(Boolean).length,
-    longestGapDays,
+    missingDays: leadingGapDays + trailingGapDays + lostDays,
+    longestGapDays: Math.max(leadingGapDays, trailingGapDays, longestLost),
+    leadingGapDays,
+    trailingGapDays,
+    zeroDays: absent - leadingGapDays - trailingGapDays - lostDays,
   };
 }
 
@@ -195,8 +223,9 @@ export function normalizeSeries(
   projectTotals: DailyPoint[],
   from: string,
   to: string,
+  unknown: ReadonlySet<string> = new Set(),
 ): NormalizedSeries {
-  const aligned = alignToRange(points, from, to);
+  const aligned = alignToRange(points, from, to, unknown);
   const asDaily: DailyPoint[] = aligned.dates.map((date, index) => ({
     date,
     views: aligned.values[index] as number,
@@ -231,6 +260,9 @@ export function normalizeSeries(
     rawValues: aligned.values,
     missingDays: aligned.missingDays,
     longestGapDays: aligned.longestGapDays,
+    leadingGapDays: aligned.leadingGapDays,
+    trailingGapDays: aligned.trailingGapDays,
+    zeroDays: aligned.zeroDays,
     filledDays: aligned.missingDays,
     totalsCoverage: Math.round(totalsCoverage * 1000) / 1000,
   };

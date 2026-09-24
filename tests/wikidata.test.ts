@@ -3,6 +3,7 @@ import {
   classifySearchResult,
   getLabels,
   getSitelinks,
+  isDisambiguation,
   probeLanguages,
   resolveTopic,
   scoreEntry,
@@ -170,11 +171,121 @@ describe('resolveTopic', () => {
     expect(result.qid).toBe('Q2');
   });
 
+  it('offers the item whose article carries exactly the queried title as a choice instead of picking by label', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          json({
+            search: [
+              { id: 'Q612825', label: 'online dating service', match: { type: 'label', text: 'online dating service' } },
+              { id: 'Q28134845', label: 'dating app', match: { type: 'alias', text: 'online dating app' } },
+              { id: 'Q60972195', label: 'online dating', match: { type: 'label', text: 'online dating' } },
+            ],
+          }),
+        )
+        .mockResolvedValueOnce(
+          json({
+            entities: {
+              Q612825: { sitelinks: sitelinks({ enwiki: 'Online dating', plwiki: 'Internetowy serwis randkowy', ukwiki: 'Онлайнова служба знайомств' }) },
+              Q28134845: { sitelinks: sitelinks({ enwiki: 'Dating app' }) },
+              Q60972195: { sitelinks: sitelinks({ dewiki: 'Online-Dating', frwiki: 'Rencontre en ligne' }) },
+            },
+          }),
+        ),
+    );
+
+    const result = await resolveTopic('Online dating', 'en', FAST);
+
+    expect(result.candidates.map((item) => item.qid).sort()).toEqual(['Q60972195', 'Q612825']);
+    expect(result.others.map((item) => item.qid)).toContain('Q28134845');
+  });
+
+  it('never lets an article title alone pick the item: Tinder the app versus tinder the fire starter', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          json({
+            search: [
+              { id: 'Q15078152', label: 'Tinder', description: 'dating platform', match: { type: 'label', text: 'Tinder' } },
+              { id: 'Q37456470', label: 'Tinder', description: 'family name', match: { type: 'label', text: 'Tinder' } },
+              { id: 'Q143518', label: 'tinder', description: 'fire starter', match: { type: 'label', text: 'tinder' } },
+            ],
+          }),
+        )
+        .mockResolvedValueOnce(
+          json({
+            entities: {
+              Q15078152: { sitelinks: sitelinks({ enwiki: 'Tinder (app)', plwiki: 'Tinder (aplikacja)', ukwiki: 'Tinder' }) },
+              Q37456470: { sitelinks: {} },
+              Q143518: { sitelinks: sitelinks({ enwiki: 'Tinder', plwiki: 'Rozpałka', ukwiki: 'Трут' }) },
+            },
+          }),
+        ),
+    );
+
+    const result = await resolveTopic('Tinder', 'en', FAST);
+
+    expect(result.candidates.map((item) => item.qid)).toEqual(['Q15078152', 'Q143518']);
+  });
+
   it('throws TopicNotFound when the search stays empty', async () => {
     const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(json({ search: [] })));
     vi.stubGlobal('fetch', fetchMock);
     await expect(resolveTopic('щось неможливе', 'uk', FAST)).rejects.toBeInstanceOf(TopicNotFound);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('falls back to article search for a phrase that is not an item label and offers every match as a choice', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      const target = String(url);
+
+      if (target.includes('wbsearchentities')) {
+        return Promise.resolve(json({ search: [] }));
+      }
+
+      if (target.includes('uk.wikipedia.org')) {
+        return Promise.resolve(
+          json({
+            query: {
+              searchinfo: { totalhits: 40 },
+              search: [{ title: 'Корпус без елемента' }, { title: 'Англійська мова' }, { title: 'Британська англійська' }],
+            },
+          }),
+        );
+      }
+
+      return Promise.resolve(
+        json({
+          entities: {
+            '-1': { missing: '' },
+            Q1860: {
+              id: 'Q1860',
+              labels: { uk: { value: 'англійська мова' } },
+              descriptions: { uk: { value: 'західногерманська мова' } },
+              sitelinks: sitelinks({ ukwiki: 'Англійська мова', enwiki: 'English language', dewiki: 'Englische Sprache' }),
+            },
+            Q7979: {
+              id: 'Q7979',
+              labels: { uk: { value: 'британська англійська' } },
+              sitelinks: sitelinks({ ukwiki: 'Британська англійська' }),
+            },
+          },
+        }),
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await resolveTopic('вивчення англійської мови', 'uk', FAST);
+
+    expect(result.matchedBy).toBe('article_search');
+    expect(result.candidates.map((item) => item.qid)).toEqual(['Q1860', 'Q7979']);
+    expect(result.candidates[0]).toMatchObject({ label: 'англійська мова', description: 'західногерманська мова', wikiCount: 3 });
+    expect(result.others.map((item) => [item.qid, Object.keys(item.titles)])).toEqual([['Q7979', ['uk']]]);
+    expect(String(fetchMock.mock.calls.at(-1)?.[0])).toContain('sites=ukwiki');
   });
 
   it('retries once when Wikidata returns an empty search for a topic that exists', async () => {
@@ -365,5 +476,15 @@ describe('probeLanguages', () => {
 
     const [entry] = await probeLanguages('Q1', ['pl'], 'fallback', FAST);
     expect(entry?.status).toBe('fetch_failed');
+  });
+});
+
+describe('isDisambiguation', () => {
+  it('recognises a disambiguation page by its description or by a title marker', () => {
+    const base = { qid: 'Q1', label: 'X', score: 1, wikiCount: 2 };
+
+    expect(isDisambiguation({ ...base, description: 'сторінка значень у проєкті Вікімедіа' }, {})).toBe(true);
+    expect(isDisambiguation({ ...base, description: '' }, { en: 'Russian invasion of Ukraine (disambiguation)' })).toBe(true);
+    expect(isDisambiguation({ ...base, description: 'war' }, { en: 'Russian invasion of Ukraine' })).toBe(false);
   });
 });

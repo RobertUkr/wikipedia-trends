@@ -33,7 +33,7 @@ export interface RankedLanguage {
   rank: number;
   lang: Lang;
   title: string;
-  medianPerMillion: number;
+  medianPerMillion: number | null;
   percentPerYear: number | null;
   ci95: [number, number] | null;
   direction: Direction;
@@ -79,8 +79,20 @@ export function minMaxScale(values: number[]): number[] {
 }
 
 export function rank(analyses: LanguageAnalysis[]): RankedLanguage[] {
-  const growth = minMaxScale(analyses.map((item) => item.trend.percentPerYear ?? 0));
-  const level = minMaxScale(analyses.map((item) => item.level.median));
+  const measured = analyses.filter((item) => item.trend.percentPerYear !== null);
+  const scaled = minMaxScale(measured.map((item) => item.trend.percentPerYear as number));
+  const growth = analyses.map((item) => {
+    const position = measured.indexOf(item);
+
+    return position === -1 ? 0 : (scaled[position] ?? 0.5);
+  });
+  const perMillion = analyses.filter((item) => item.unit === 'views_per_million');
+  const scaledLevel = minMaxScale(perMillion.map((item) => item.level.median));
+  const level = analyses.map((item) => {
+    const position = perMillion.indexOf(item);
+
+    return position === -1 ? 0.5 : (scaledLevel[position] ?? 0.5);
+  });
 
   return analyses
     .map((item, index) => {
@@ -89,10 +101,9 @@ export function rank(analyses: LanguageAnalysis[]): RankedLanguage[] {
         WEIGHTS.level * (level[index] ?? 0.5) +
         WEIGHTS.confidence * item.confidence.score;
 
-      const spansZero = item.fit.ci95[0] <= 0 && item.fit.ci95[1] >= 0;
       const notes: Message[] = [];
 
-      if (spansZero) {
+      if (item.trend.direction === 'inconclusive') {
         notes.push(message('NOTE_SPANS_ZERO'));
       }
 
@@ -112,7 +123,7 @@ export function rank(analyses: LanguageAnalysis[]): RankedLanguage[] {
         rank: 0,
         lang: item.lang,
         title: item.title,
-        medianPerMillion: Math.round(item.level.median * 100) / 100,
+        medianPerMillion: item.unit === 'views_per_million' ? Math.round(item.level.median * 100) / 100 : null,
         percentPerYear: item.trend.percentPerYear,
         ci95: item.trend.ci95,
         direction: item.trend.direction,
@@ -164,9 +175,16 @@ export async function runCompare(args: CompareArgs): Promise<CompareOutput> {
         unavailable.push({
           lang,
           project: normalizeProject(lang),
-          status: error instanceof ArticleNotFound ? 'no_data' : 'fetch_failed',
+          status: error.code === 'ShortHistory' ? 'short_history' : error instanceof ArticleNotFound ? 'no_data' : 'fetch_failed',
           title,
-          reason: message('LANGUAGE_FETCH_FAILED', { code: error.code, message: error.message }),
+          reason:
+            error.code === 'ShortHistory'
+              ? message('SHORT_HISTORY', {
+                  title,
+                  first: String(error.details?.['first'] ?? ''),
+                  last: String(error.details?.['last'] ?? ''),
+                })
+              : message('LANGUAGE_FETCH_FAILED', { code: error.code, message: error.message }),
           requiresConfirmation: false,
           searchQuery: null,
           searchHits: 0,
@@ -193,7 +211,7 @@ export async function runCompare(args: CompareArgs): Promise<CompareOutput> {
 
   const dir = outputDir();
   await mkdir(dir, { recursive: true });
-  const file = args.out ?? join(dir, `compare-${args.qid}-${args.from}_${args.to}.json`);
+  const file = args.out ?? join(dir, `compare-${args.qid}.json`);
 
   await writeFile(
     file,
@@ -233,6 +251,7 @@ export async function runCompare(args: CompareArgs): Promise<CompareOutput> {
               : null,
           reversal: item.reversal,
           missingDays: item.series.missingDays,
+          zeroDays: item.series.zeroDays,
           yoy: item.yoy,
           level: item.level,
           rawLevel: item.rawLevel,
@@ -277,7 +296,7 @@ export async function runCompare(args: CompareArgs): Promise<CompareOutput> {
 export function buildCompareCaveats(analyses: LanguageAnalysis[], comparable: boolean): Message[] {
   const caveats: Message[] = [];
   const weak = analyses.filter((item) => item.confidence.overall === 'low').map((item) => item.lang);
-  const flat = analyses.filter((item) => item.fit.ci95[0] <= 0 && item.fit.ci95[1] >= 0).map((item) => item.lang);
+  const undecided = analyses.filter((item) => item.trend.direction === 'inconclusive').map((item) => item.lang);
   const spiky = analyses.filter((item) => item.outlierIndices.length > 0);
   const declining = analyses.filter((item) => (item.trend.percentPerYear ?? 0) < 0 && item.fit.ci95[1] < 0);
 
@@ -293,8 +312,8 @@ export function buildCompareCaveats(analyses: LanguageAnalysis[], comparable: bo
     caveats.push(message('LOW_CONFIDENCE_LANGUAGES', { langs: weak.join(', ') }));
   }
 
-  if (flat.length > 0) {
-    caveats.push(message('SPANS_ZERO_LANGUAGES', { langs: flat.join(', ') }));
+  if (undecided.length > 0) {
+    caveats.push(message('SPANS_ZERO_LANGUAGES', { langs: undecided.join(', ') }));
   }
 
   if (spiky.length > 0) {

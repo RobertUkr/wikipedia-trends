@@ -131,11 +131,13 @@ export async function requestJson<T>(url: string, opts: RequestOptions = {}): Pr
       lastRequestAt = Date.now();
 
       let response: Response;
+      let body = '';
       try {
         response = await fetch(url, {
           headers: { 'user-agent': userAgent(), accept: 'application/json' },
           signal: AbortSignal.timeout(timeoutMs),
         });
+        body = response.ok ? await response.text() : await response.text().catch(() => '');
       } catch (cause) {
         lastError = new NetworkError(url, cause);
         if (attempt === retries) break;
@@ -144,10 +146,9 @@ export async function requestJson<T>(url: string, opts: RequestOptions = {}): Pr
       }
 
       if (response.ok) {
-        return (await response.json()) as T;
+        return JSON.parse(body) as T;
       }
 
-      const body = await response.text().catch(() => '');
       lastError = new HttpError(response.status, url, body);
       if (!isRetryable(response.status) || attempt === retries) break;
       await sleep(retryDelay(attempt, response, opts));
@@ -220,6 +221,62 @@ function encodeTitle(title: string): string {
 
 interface PerArticleResponse {
   items?: Array<{ timestamp?: string; views?: number }>;
+}
+
+export interface PageMove {
+  date: string;
+  from: string;
+  to: string;
+}
+
+interface MoveLogResponse {
+  query?: { logevents?: Array<{ timestamp?: string; title?: string; params?: { target_title?: string } }> };
+}
+
+export async function getMovesFrom(project: string, title: string, opts: RequestOptions = {}): Promise<PageMove[]> {
+  const params = new URLSearchParams({
+    action: 'query',
+    list: 'logevents',
+    letype: 'move',
+    letitle: title,
+    leprop: 'title|details|timestamp',
+    lelimit: '50',
+    format: 'json',
+    formatversion: '2',
+  });
+  const payload = await requestJson<MoveLogResponse>(`https://${normalizeProject(project)}/w/api.php?${params.toString()}`, opts);
+
+  return (payload.query?.logevents ?? [])
+    .filter((event) => event.timestamp && event.params?.target_title)
+    .map((event) => ({ date: (event.timestamp as string).slice(0, 10), from: event.title ?? title, to: event.params?.target_title as string }));
+}
+
+export interface PageRedirect {
+  title: string;
+  lastEdited: string;
+}
+
+interface RedirectsResponse {
+  query?: { pages?: Array<{ title?: string; revisions?: Array<{ timestamp?: string }> }> };
+}
+
+export async function getRedirectsTo(project: string, title: string, opts: RequestOptions = {}): Promise<PageRedirect[]> {
+  const params = new URLSearchParams({
+    action: 'query',
+    generator: 'redirects',
+    titles: title,
+    grdnamespace: '0',
+    grdlimit: 'max',
+    prop: 'revisions',
+    rvprop: 'timestamp',
+    format: 'json',
+    formatversion: '2',
+  });
+  const payload = await requestJson<RedirectsResponse>(`https://${normalizeProject(project)}/w/api.php?${params.toString()}`, opts);
+
+  return (payload.query?.pages ?? [])
+    .filter((page) => page.title)
+    .map((page) => ({ title: page.title as string, lastEdited: page.revisions?.[0]?.timestamp ?? '' }));
 }
 
 export function articleViewsUrl(project: string, title: string, start: string, end: string): string {

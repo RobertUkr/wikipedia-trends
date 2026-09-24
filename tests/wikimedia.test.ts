@@ -3,6 +3,8 @@ import {
   articleViewsUrl,
   getArticleViews,
   getProjectTotals,
+  getMovesFrom,
+  getRedirectsTo,
   normalizeProject,
   projectTotalsUrl,
   DEFAULT_CONTACT,
@@ -213,5 +215,75 @@ describe('searchArticles', () => {
 describe('stripMarkup', () => {
   it('collapses whitespace and removes tags', () => {
     expect(stripMarkup('<b>a</b>   b\n c')).toBe('a b c');
+  });
+});
+
+describe('requestJson body failures', () => {
+  it('retries when the body stream fails after the headers arrived, instead of leaking the raw error', async () => {
+    const broken = {
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      text: () => Promise.reject(new DOMException('The operation was aborted due to timeout', 'TimeoutError')),
+    } as unknown as Response;
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(broken)
+      .mockImplementationOnce(() =>
+        Promise.resolve(new Response(JSON.stringify({ query: { searchinfo: { totalhits: 0 }, search: [] } }))),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(searchArticles('de', 'Neu', 5, FAST)).resolves.toMatchObject({ totalHits: 0, hits: [] });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('getMovesFrom', () => {
+  it('lists the moves logged under a former title with their target and day', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              query: {
+                logevents: [
+                  { timestamp: '2023-03-07T09:15:35Z', title: '2022 Russian invasion of Ukraine', params: { target_title: 'Russian invasion of Ukraine (2022–present)' } },
+                ],
+              },
+            }),
+          ),
+        ),
+      ),
+    );
+
+    await expect(getMovesFrom('en', '2022 Russian invasion of Ukraine', FAST)).resolves.toEqual([
+      { date: '2023-03-07', from: '2022 Russian invasion of Ukraine', to: 'Russian invasion of Ukraine (2022–present)' },
+    ]);
+  });
+});
+
+describe('getRedirectsTo', () => {
+  it('lists the article redirects pointing at a title with the time each was last edited', async () => {
+    const fetchMock = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        json({
+          query: {
+            pages: [
+              { title: 'Old title', revisions: [{ timestamp: '2025-08-31T09:59:00Z' }] },
+              { title: 'Typo title' },
+            ],
+          },
+        }),
+      ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(getRedirectsTo('de', 'New title', FAST)).resolves.toEqual([
+      { title: 'Old title', lastEdited: '2025-08-31T09:59:00Z' },
+      { title: 'Typo title', lastEdited: '' },
+    ]);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain('https://de.wikipedia.org/w/api.php?action=query&generator=redirects&titles=New+title');
   });
 });

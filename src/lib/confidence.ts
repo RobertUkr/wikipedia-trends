@@ -21,6 +21,10 @@ export const WEIGHTS = {
 export type ConfidenceLevel = 'low' | 'medium' | 'high';
 export type ComponentName = keyof typeof WEIGHTS;
 
+export function levelFromScore(score: number): ConfidenceLevel {
+  return score >= 0.7 ? 'high' : score >= 0.45 ? 'medium' : 'low';
+}
+
 export interface ConfidenceComponent {
   score: number;
   observed: number;
@@ -46,6 +50,8 @@ export interface ConfidenceInput {
   rangeDays: number;
   missingDays: number;
   longestGapDays: number;
+  zeroDays?: number;
+  formerTitles?: string[];
   outlierDays: number;
   ci95: [number, number];
   normalized: boolean;
@@ -199,7 +205,7 @@ export function assessConfidence(input: ConfidenceInput): ConfidenceReport {
 
   const caveats = buildCaveats(input, components);
   const codes = new Set(caveats.map((caveat) => caveat.code));
-  let overall: ConfidenceLevel = score >= 0.7 ? 'high' : score >= 0.45 ? 'medium' : 'low';
+  let overall = levelFromScore(score);
 
   if (components.length.score < 0.35 && overall === 'high') {
     overall = 'medium';
@@ -243,16 +249,16 @@ export function buildCaveats(
     caveats.push(message('SERIES_SHORTER_THAN_YOY', { days: input.rangeDays, target: LENGTH_TARGET_DAYS }));
   }
 
+  const primaryCi = input.trends ? (input.trends.relativeCi ?? input.trends.absoluteCi) : null;
+  const inconclusive = primaryCi ? trendDirection(primaryCi) === 'inconclusive' : spansZero;
+
   if (spansZero) {
-    caveats.push(message('INTERVAL_SPANS_ZERO'));
-  } else if (components.stability.score < 1) {
-    const total = 5;
-    caveats.push(
-      message('SLOPE_SIGN_UNSTABLE', {
-        flipped: Math.round((1 - components.stability.score) * total),
-        total,
-      }),
-    );
+    if (inconclusive) {
+      caveats.push(message('INTERVAL_SPANS_ZERO'));
+    }
+  } else if (components.stability.score < 1 && components.stability.detail.code === 'DETAIL_STABILITY') {
+    const { agreeing, total } = components.stability.detail.params as { agreeing: number; total: number };
+    caveats.push(message('SLOPE_SIGN_UNSTABLE', { flipped: total - agreeing, total }));
   }
 
   if (input.reversal) {
@@ -265,9 +271,17 @@ export function buildCaveats(
     );
   }
 
-  if (input.trends && input.trends.relativePercent !== null && input.trends.absolutePercent !== null) {
-    const absoluteFalling = trendDirection(input.trends.absoluteCi) === 'down';
-    const relativeHolding = trendDirection(input.trends.relativeCi) === 'flat';
+  const absoluteDirection = trendDirection(input.trends?.absoluteCi ?? null);
+  const relativeDirection = trendDirection(input.trends?.relativeCi ?? null);
+
+  if (
+    input.trends &&
+    input.trends.relativePercent !== null &&
+    input.trends.absolutePercent !== null &&
+    absoluteDirection !== relativeDirection
+  ) {
+    const absoluteFalling = absoluteDirection === 'down';
+    const relativeHolding = relativeDirection === 'flat';
 
     caveats.push(
       absoluteFalling && relativeHolding
@@ -289,8 +303,14 @@ export function buildCaveats(
 
   if (input.longestGapDays >= GAP_SUSPICIOUS_DAYS) {
     caveats.push(message('LONG_GAP_POSSIBLE_RENAME', { days: input.longestGapDays }));
-  } else if (input.missingDays > 0) {
-    caveats.push(message('GAPS_INTERPOLATED', { days: input.missingDays }));
+  }
+
+  if ((input.formerTitles ?? []).length > 1) {
+    caveats.push(message('TITLE_HISTORY_MERGED', { titles: (input.formerTitles ?? []).join(' → ') }));
+  }
+
+  if ((input.zeroDays ?? 0) > 0) {
+    caveats.push(message('ZERO_VIEW_DAYS', { days: input.zeroDays ?? 0 }));
   }
 
   if (!input.normalized) {

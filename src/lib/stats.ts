@@ -226,6 +226,12 @@ export interface TrendPercent {
   baselineSource: 'intercept' | 'median' | 'none';
 }
 
+/** True when a 95% interval includes zero, so the sign of the slope is not established. */
+export function spansZero(ci: [number, number]): boolean {
+  return ci[0] <= 0 && ci[1] >= 0;
+}
+
+/** Classifies a %/year interval: clear of zero → up/down, within the flat band → flat, else inconclusive. */
 export function trendDirection(ci95: [number, number] | null): Direction {
   if (ci95 === null) {
     return 'inconclusive';

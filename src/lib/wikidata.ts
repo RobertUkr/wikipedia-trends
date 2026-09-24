@@ -149,8 +149,23 @@ async function fetchSitelinkMap(
   return result;
 }
 
+const QID = /^Q\d+$/;
+
+/** Whether the value is a Wikidata item id such as Q42. */
+export function isQid(value: string): boolean {
+  return QID.test(value);
+}
+
+/** Throws InvalidInput for a --qid argument that is not a Wikidata item id. */
+export function assertQidArg(qid: string): void {
+  if (!isQid(qid)) {
+    throw new SkillError('InvalidInput', `--qid "${qid}" is not a Wikidata item id`, { qid });
+  }
+}
+
+/** Article titles per language for a Wikidata item; throws when it has no Wikipedia articles. */
 export async function getSitelinks(qid: string, opts: RequestOptions = {}): Promise<Record<Lang, string>> {
-  if (!/^Q\d+$/.test(qid)) {
+  if (!isQid(qid)) {
     throw new SkillError('InvalidInput', `"${qid}" is not a Wikidata item id (expected Q123)`, { qid });
   }
   const map = await fetchSitelinkMap([qid], opts);
@@ -295,7 +310,7 @@ export async function resolveByArticleSearch(
 
   const payload = await requestJson<ArticleEntitiesResponse>(url, opts);
   const entities = Object.values(payload.entities ?? {}).filter(
-    (entity): entity is typeof entity & { id: string } => typeof entity.id === 'string' && /^Q\d+$/.test(entity.id),
+    (entity): entity is typeof entity & { id: string } => typeof entity.id === 'string' && isQid(entity.id),
   );
   const byTitle = new Map(entities.map((entity) => [entity.sitelinks?.[site]?.title ?? '', entity]));
 

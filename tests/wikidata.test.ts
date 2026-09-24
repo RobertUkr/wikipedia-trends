@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  assertQidArg,
+  isQid,
   classifySearchResult,
   getLabels,
   getSitelinks,
@@ -486,5 +488,19 @@ describe('isDisambiguation', () => {
     expect(isDisambiguation({ ...base, description: 'сторінка значень у проєкті Вікімедіа' }, {})).toBe(true);
     expect(isDisambiguation({ ...base, description: '' }, { en: 'Russian invasion of Ukraine (disambiguation)' })).toBe(true);
     expect(isDisambiguation({ ...base, description: 'war' }, { en: 'Russian invasion of Ukraine' })).toBe(false);
+  });
+});
+
+describe('isQid and assertQidArg', () => {
+  it('accepts only Wikidata item ids', () => {
+    expect(isQid('Q42')).toBe(true);
+    expect(isQid('q42')).toBe(false);
+    expect(isQid('P31')).toBe(false);
+    expect(isQid('Q42 ')).toBe(false);
+  });
+
+  it('turns a bad --qid into InvalidInput', () => {
+    expect(() => assertQidArg('Q1')).not.toThrow();
+    expect(() => assertQidArg('Moon')).toThrow(expect.objectContaining({ code: 'InvalidInput' }));
   });
 });

@@ -1,8 +1,8 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { cacheDir, cacheKey, readCache, writeCache } from '../src/lib/cache.js';
+import { cacheDir, cacheKey, readCache, writeArtifact, writeCache } from '../src/lib/cache.js';
 
 let dir: string;
 
@@ -52,5 +52,19 @@ describe('file cache', () => {
     const key = cacheKey({ a: '3' });
     await writeFile(join(cacheDir(), `${key}.json`), 'not json', 'utf8');
     await expect(readCache(key)).resolves.toBeNull();
+  });
+});
+
+describe('writeArtifact', () => {
+  it('creates the output directory and writes pretty JSON', async () => {
+    const output = join(dir, 'fresh-output');
+    process.env['WIKIPEDIA_TRENDS_OUTPUT_DIR'] = output;
+
+    try {
+      await writeArtifact(join(output, 'a.json'), { a: 1 });
+      await expect(readFile(join(output, 'a.json'), 'utf8')).resolves.toBe('{\n  "a": 1\n}');
+    } finally {
+      delete process.env['WIKIPEDIA_TRENDS_OUTPUT_DIR'];
+    }
   });
 });

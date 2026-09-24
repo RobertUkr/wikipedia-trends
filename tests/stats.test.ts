@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { aggregateWeekly } from '../src/lib/normalize.js';
 import {
+  spansZero,
   FLAT_BAND_PERCENT,
   WEEKS_PER_YEAR,
   detectOutliers,
@@ -327,5 +328,14 @@ describe('trendDirection', () => {
 
     expect(trendPercentPerYear(rising).direction).toBe('up');
     expect(trendPercentPerYear(flat).direction).toBe('flat');
+  });
+});
+
+describe('spansZero', () => {
+  it('is true only when the interval includes zero', () => {
+    expect(spansZero([-1, 2])).toBe(true);
+    expect(spansZero([0, 2])).toBe(true);
+    expect(spansZero([0.1, 2])).toBe(false);
+    expect(spansZero([-3, -0.5])).toBe(false);
   });
 });

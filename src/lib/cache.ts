@@ -30,6 +30,13 @@ export function outputDir(): string {
   return override && override.length > 0 ? override : join(packageRoot(), 'output');
 }
 
+/** Writes a pretty-printed JSON artifact to `file`, creating the output directory first. */
+export async function writeArtifact(file: string, data: unknown): Promise<void> {
+  await mkdir(outputDir(), { recursive: true });
+  await writeFile(file, JSON.stringify(data, null, 2), 'utf8');
+}
+
+/** Cache key for a request: a hash of its parameters that does not depend on their order. */
 export function cacheKey(parts: Record<string, string | number>): string {
   const canonical = Object.keys(parts)
     .sort()

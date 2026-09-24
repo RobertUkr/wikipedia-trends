@@ -1,14 +1,22 @@
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+/** Chart width; the viewBox matches the size in points, so one unit is one PDF point. */
 export const CHART_WIDTH = 520;
+/** Chart height, in the same units. */
 export const CHART_HEIGHT = 260;
+/** Series colours by language order, one per report language; they repeat past eight. */
 export const PALETTE = ['#2563eb', '#0d9488', '#7c3aed', '#b45309', '#475569', '#db2777', '#65a30d', '#0891b2'];
+/** Colour of spike days. */
 export const OUTLIER_COLOR = '#e11d48';
+/** Colour of the recent-period marker. */
 export const MARKER_COLOR = '#6b7280';
+/** Chart font: DejaVu Sans covers Cyrillic and matches the font embedded in the PDF. */
 export const FONT_FAMILY = 'DejaVuSans';
 
+// Left room holds tick labels and the rotated y label; bottom room holds date labels and two legend rows.
 const PAD = { left: 46, right: 12, top: 24, bottom: 52 };
 
+/** Trend line and its 95% band, one point per week, on the chart's per-day scale. */
 export interface TrendBand {
   dates: string[];
   value: number[];
@@ -16,6 +24,7 @@ export interface TrendBand {
   upper: number[];
 }
 
+/** One language on the chart: daily values, 7-day average, trend band and spike dates. */
 export interface ChartSeries {
   id: string;
   label: string;
@@ -27,6 +36,7 @@ export interface ChartSeries {
   outliers?: string[];
 }
 
+/** Localised legend labels for the four line styles. */
 export interface ChartLegendLabels {
   raw: string;
   smoothed: string;
@@ -34,6 +44,7 @@ export interface ChartLegendLabels {
   outliers: string;
 }
 
+/** Size, labels and font for lineChart; omitted fields fall back to defaults. */
 export interface ChartOptions {
   width?: number;
   height?: number;
@@ -45,16 +56,19 @@ export interface ChartOptions {
   emptyLabel?: string;
 }
 
+/** Numeric axis range: day numbers for x, values for y. */
 export interface Domain {
   min: number;
   max: number;
 }
 
+/** Axis range widened to round tick values, with the ticks and their step. */
 export interface Ticks extends Domain {
   ticks: number[];
   step: number;
 }
 
+/** Escapes text for SVG; labels include article titles, which can contain any character. */
 export function escapeXml(text: string): string {
   return text
     .replace(/&/g, '&amp;')
@@ -64,6 +78,7 @@ export function escapeXml(text: string): string {
     .replace(/'/g, '&apos;');
 }
 
+/** Whole days since the Unix epoch for a YYYY-MM-DD date read as UTC. */
 export function dayNumber(date: string): number {
   return Math.round(Date.parse(`${date}T00:00:00Z`) / DAY_MS);
 }
@@ -76,6 +91,7 @@ function finite(values: Array<number | null | undefined>): number[] {
   return values.filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
 }
 
+/** X range in day numbers covering every data and trend point. */
 export function xDomain(series: ChartSeries[]): Domain {
   const days = series.flatMap((item) => [
     ...item.dates.map(dayNumber),
@@ -89,6 +105,7 @@ export function xDomain(series: ChartSeries[]): Domain {
   const min = Math.min(...days);
   const max = Math.max(...days);
 
+  // A single day would give a zero-width range and a division by zero when scaling.
   if (min === max) {
     return { min: min - 1, max: max + 1 };
   }
@@ -96,8 +113,10 @@ export function xDomain(series: ChartSeries[]): Domain {
   return { min, max };
 }
 
+// Relative tolerance: a spread this small against the values is float noise on a flat series, not real change.
 const FLAT_TOLERANCE = 1e-9;
 
+/** Y range with 5% padding that never dips below zero for non-negative data. */
 export function yDomain(values: Array<number | null | undefined>): Domain {
   const usable = finite(values);
 
@@ -108,6 +127,7 @@ export function yDomain(values: Array<number | null | undefined>): Domain {
   let min = Math.min(...usable);
   let max = Math.max(...usable);
 
+  // A flat series gets an artificial ±10% spread so it draws mid-plot instead of collapsing the scale.
   if (max - min <= Math.max(Math.abs(min), Math.abs(max)) * FLAT_TOLERANCE) {
     const spread = max === 0 ? 1 : Math.abs(max) * 0.1;
     min = max - spread;
@@ -120,6 +140,7 @@ export function yDomain(values: Array<number | null | undefined>): Domain {
   return { min: paddedMin, max: max + padding };
 }
 
+// Rounds a step to 1, 2 or 5 times a power of ten.
 function niceStep(raw: number): number {
   const exponent = Math.floor(Math.log10(raw));
   const fraction = raw / 10 ** exponent;
@@ -128,6 +149,7 @@ function niceStep(raw: number): number {
   return nice * 10 ** exponent;
 }
 
+/** Round-numbered ticks covering the domain in about `count` intervals. */
 export function niceTicks(domain: Domain, count = 5): Ticks {
   const span = domain.max - domain.min;
 
@@ -135,6 +157,7 @@ export function niceTicks(domain: Domain, count = 5): Ticks {
     return { min: 0, max: 1, ticks: [0, 1], step: 1 };
   }
 
+  // A flat domain would give a near-zero step, so it is widened first.
   if (span <= Math.max(Math.abs(domain.min), Math.abs(domain.max)) * FLAT_TOLERANCE) {
     return niceTicks(yDomain([domain.min, domain.max]), count);
   }
@@ -143,11 +166,13 @@ export function niceTicks(domain: Domain, count = 5): Ticks {
   const min = Math.floor(domain.min / step) * step;
   const max = Math.ceil(domain.max / step) * step;
   const intervals = Math.round((max - min) / step);
+  // Built from integer multiples of the step, so float error does not accumulate across ticks.
   const ticks = Array.from({ length: intervals + 1 }, (_, index) => Math.round(min / step + index) * step);
 
   return { min, max, ticks, step };
 }
 
+/** X-axis tick dates: month starts every 6, 3 or 1 months by span, or about five evenly spaced days when short. */
 export function dateTicks(domain: Domain): string[] {
   const spanDays = domain.max - domain.min;
   const months = spanDays > 730 ? 6 : spanDays > 365 ? 3 : spanDays > 90 ? 1 : 0;
@@ -165,6 +190,7 @@ export function dateTicks(domain: Domain): string[] {
 
   const start = new Date(domain.min * DAY_MS);
   let year = start.getUTCFullYear();
+  // First month start on or after the range start, aligned to a multiple of the interval (e.g. Jan/Apr/Jul/Oct).
   let month = Math.ceil((start.getUTCMonth() + (start.getUTCDate() > 1 ? 1 : 0)) / months) * months;
   const ticks: string[] = [];
 
@@ -213,6 +239,7 @@ function round(value: number): string {
   return (Math.round(value * 100) / 100).toString();
 }
 
+// The pen lifts at null points, so missing values leave a gap instead of a bridging line.
 function path(points: Array<[number, number] | null>): string {
   const commands: string[] = [];
   let drawing = false;
@@ -230,6 +257,7 @@ function path(points: Array<[number, number] | null>): string {
   return commands.join('');
 }
 
+/** Values the y scale is fitted to: everything except raw values on spike days, so one spike does not flatten the chart. */
 export function scaleValues(series: ChartSeries[]): Array<number | null> {
   return series.flatMap((item) => {
     const spikes = new Set(item.outliers ?? []);
@@ -245,6 +273,7 @@ export function scaleValues(series: ChartSeries[]): Array<number | null> {
   });
 }
 
+/** Renders the chart as an SVG string: raw, smoothed and trend lines per language, spikes, marker and legend. */
 export function lineChart(series: ChartSeries[], options: ChartOptions = {}): string {
   const width = options.width ?? CHART_WIDTH;
   const height = options.height ?? CHART_HEIGHT;
@@ -256,6 +285,7 @@ export function lineChart(series: ChartSeries[], options: ChartOptions = {}): st
     height: height - PAD.top - PAD.bottom,
   };
 
+  // Spikes included: this only decides whether there is anything to draw; the scale comes from scaleValues.
   const allValues = series.flatMap((item) => [
     ...(item.raw ?? []),
     ...(item.smoothed ?? []),
@@ -336,11 +366,13 @@ export function lineChart(series: ChartSeries[], options: ChartOptions = {}): st
   series.forEach((item, index) => {
     const color = item.color ?? PALETTE[index % PALETTE.length] ?? '#111827';
     const days = item.dates.map(dayNumber);
+    // Clipped to the plot, because raw spikes can exceed the spike-free scale.
     parts.push(`<g class="series" data-series="${text(item.id)}" clip-path="url(#plot-area)">`);
 
     if (item.trend && item.trend.dates.length > 0) {
       const trendDays = item.trend.dates.map(dayNumber);
       const upper = trendDays.map((day, point) => `${round(scaleX(day))},${round(scaleY(item.trend?.upper[point] ?? 0))}`);
+      // Lower edge reversed so the polygon runs out along the upper edge and back along the lower one.
       const lower = trendDays
         .map((day, point) => `${round(scaleX(day))},${round(scaleY(item.trend?.lower[point] ?? 0))}`)
         .reverse();
@@ -389,6 +421,7 @@ export function lineChart(series: ChartSeries[], options: ChartOptions = {}): st
 
         const cx = scaleX(dayNumber(date));
 
+        // A spike above the scale is shown as a triangle at the top edge instead of a dot.
         if (value > y.max) {
           offScale.push(
             `<polygon class="outlier off-scale" points="${round(cx - 2)},${plot.top + 4} ${round(cx + 2)},${plot.top + 4} ` +
@@ -404,6 +437,7 @@ export function lineChart(series: ChartSeries[], options: ChartOptions = {}): st
     parts.push('</g>');
   });
 
+  // Added after the clipped series so the off-scale triangles stay visible and on top.
   parts.push(...offScale);
 
   if (options.marker) {
@@ -426,6 +460,7 @@ export function lineChart(series: ChartSeries[], options: ChartOptions = {}): st
       `<rect class="legend-swatch" x="${cursor}" y="${legendY - 5}" width="10" height="3" fill="${color}"/>`,
     );
     parts.push(`<text class="legend" x="${cursor + 13}" y="${legendY - 2}" fill="#111827">${text(item.label)}</text>`);
+    // No text metrics in a plain SVG string: advance by an estimated glyph width for the 7pt font.
     cursor += 24 + item.label.length * 4.6;
   });
 

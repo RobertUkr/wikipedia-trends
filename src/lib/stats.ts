@@ -2,19 +2,28 @@ import { SkillError } from '../types.js';
 import type { Message } from '../types.js';
 import { message } from './messages.js';
 
+/** Modified z-score above which a day's residual counts as a spike (Iglewicz–Hoaglin 3.5). */
 export const MODIFIED_Z_THRESHOLD = 3.5;
+/** Normal quantile at 0.75: scales MAD to a standard-deviation equivalent in the modified z-score. */
 export const MAD_TO_SIGMA = 0.6745;
+/** Two-sided 95% normal critical value. */
 export const Z95 = 1.959963985;
+/** Cap on Theil–Sen input size; pairwise slopes grow as n², so longer series are thinned. */
 export const MAX_FIT_POINTS = 1500;
+/** Days per year: daily periods-per-year, seasonal period and year-over-year window. */
 export const YEAR_DAYS = 365;
+/** Weekly periods per year (≈52.14), used to annualise slopes fitted on weekly sums. */
 export const WEEKS_PER_YEAR = 365 / 7;
+/** Full yearly cycles required before seasonality is estimated. */
 export const MIN_SEASONAL_CYCLES = 3;
 
+/** One (x, y) observation; x is the day or week index. */
 export interface Point {
   x: number;
   y: number;
 }
 
+/** Theil–Sen line with its 95% slope interval, point and pair counts, and whether input was thinned. */
 export interface TrendFit {
   slope: number;
   intercept: number;
@@ -24,6 +33,7 @@ export interface TrendFit {
   sampled: boolean;
 }
 
+/** Yearly seasonal profile, its bias-corrected strength and the deseasonalised series. */
 export interface SeasonalityResult {
   available: boolean;
   reason: Message | null;
@@ -35,6 +45,7 @@ export interface SeasonalityResult {
   detected: boolean;
 }
 
+/** Year-over-year change of the median over the last 365 days vs the 365 before. */
 export interface YoyResult {
   changePercent: number | null;
   current: number | null;
@@ -43,6 +54,7 @@ export interface YoyResult {
   reason: Message | null;
 }
 
+/** Descriptive statistics of a series: median, mean, p10/p90, coefficient of variation, min/max. */
 export interface Summary {
   n: number;
   median: number;
@@ -54,6 +66,7 @@ export interface Summary {
   max: number;
 }
 
+/** Arithmetic mean; 0 for an empty series. */
 export function mean(values: number[]): number {
   if (values.length === 0) {
     return 0;
@@ -62,6 +75,7 @@ export function mean(values: number[]): number {
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
+/** Linearly interpolated q-quantile (0..1); 0 for an empty series. */
 export function quantile(values: number[], q: number): number {
   if (values.length === 0) {
     return 0;
@@ -82,10 +96,12 @@ export function quantile(values: number[], q: number): number {
   return low + (high - low) * (position - lower);
 }
 
+/** Median; the robust centre used throughout instead of the mean. */
 export function median(values: number[]): number {
   return quantile(values, 0.5);
 }
 
+/** Median absolute deviation from the median, the robust spread behind spike detection. */
 export function mad(values: number[]): number {
   if (values.length === 0) {
     return 0;
@@ -96,6 +112,7 @@ export function mad(values: number[]): number {
   return median(values.map((value) => Math.abs(value - center)));
 }
 
+/** Sample standard deviation (n − 1); 0 for fewer than 2 values. */
 export function stdev(values: number[]): number {
   if (values.length < 2) {
     return 0;
@@ -107,6 +124,7 @@ export function stdev(values: number[]): number {
   return Math.sqrt(sum / (values.length - 1));
 }
 
+/** Turns a series into points indexed by position, so the slope is per day or per week. */
 export function toPoints(values: number[]): Point[] {
   return values.map((y, x) => ({ x, y }));
 }
@@ -116,11 +134,13 @@ function thin(points: Point[]): { points: Point[]; sampled: boolean } {
     return { points, sampled: false };
   }
 
+  // Keep every k-th point so the thinned series still spans the whole range evenly.
   const stride = Math.ceil(points.length / MAX_FIT_POINTS);
 
   return { points: points.filter((_, index) => index % stride === 0), sampled: true };
 }
 
+/** Theil–Sen slope (median of pairwise slopes) with a 95% interval, robust to spikes. */
 export function theilSen(input: Point[]): TrendFit {
   const { points, sampled } = thin(input);
   const n = points.length;
@@ -139,6 +159,7 @@ export function theilSen(input: Point[]): TrendFit {
       const b = points[j] as Point;
       const dx = b.x - a.x;
 
+      // Pairs with equal x have no defined slope and are skipped.
       if (dx !== 0) {
         slopes[count] = (b.y - a.y) / dx;
         count += 1;
@@ -146,10 +167,12 @@ export function theilSen(input: Point[]): TrendFit {
     }
   }
 
+  // Typed-array sort is numeric, unlike the default Array#sort.
   const used = slopes.subarray(0, count).slice().sort();
   const slope = quantileSorted(used, 0.5);
   const intercept = median(points.map((point) => point.y - slope * point.x));
 
+  // Variance of Kendall's S (no ties); the interval bounds are ranks of the sorted pairwise slopes (Sen 1968).
   const varS = (n * (n - 1) * (2 * n + 5)) / 18;
   const spread = Z95 * Math.sqrt(varS);
   const lowerIndex = clampIndex(Math.floor((count - spread) / 2), count);
@@ -188,10 +211,13 @@ function quantileSorted(sorted: Float64Array, q: number): number {
   return low + (high - low) * (position - lower);
 }
 
+/** Trend verdict derived from the 95% interval, not from the point estimate. */
 export type Direction = 'up' | 'down' | 'flat' | 'inconclusive';
 
+/** ±%/year band: an interval spanning zero but within it is 'flat', a wider one 'inconclusive'. */
 export const FLAT_BAND_PERCENT = 5;
 
+/** Compound %/year trend with its 95% interval, direction and the fitted baseline level. */
 export interface TrendPercent {
   percentPerYear: number | null;
   ci95: [number, number] | null;
@@ -222,6 +248,7 @@ export function trendDirection(ci95: [number, number] | null): Direction {
   return 'inconclusive';
 }
 
+/** Offset added before taking logs: 0 if all values are positive, else half the smallest positive; null if too few positives. */
 export function logOffset(values: number[]): number | null {
   const positive = values.filter((value) => value > 0);
 
@@ -236,10 +263,12 @@ export function logOffset(values: number[]): number | null {
   return Math.min(...positive) / 2;
 }
 
+/** Converts a log-slope per period into a compound %/year, which can never fall below −100%. */
 export function compoundPercent(logSlope: number, periodsPerYear: number): number {
   return (Math.exp(logSlope * periodsPerYear) - 1) * 100;
 }
 
+/** Compound %/year trend from a Theil–Sen fit on log values; pass WEEKS_PER_YEAR for weekly series. */
 export function trendPercentPerYear(values: number[], periodsPerYear: number = YEAR_DAYS): TrendPercent {
   const offset = logOffset(values);
 
@@ -248,6 +277,7 @@ export function trendPercentPerYear(values: number[], periodsPerYear: number = Y
   }
 
   const logFit = theilSen(toPoints(values.map((value) => Math.log(Math.max(value, 0) + offset))));
+  // Unrounded bounds decide the direction so rounding cannot flip a bound across zero or the flat band.
   const exact: [number, number] = [
     compoundPercent(logFit.ci95[0], periodsPerYear),
     compoundPercent(logFit.ci95[1], periodsPerYear),
@@ -257,6 +287,7 @@ export function trendPercentPerYear(values: number[], periodsPerYear: number = Y
     percentPerYear: round1(compoundPercent(logFit.slope, periodsPerYear)),
     ci95: [round1(exact[0]), round1(exact[1])],
     direction: trendDirection(exact),
+    // Back-transforms the intercept to the original scale: the fitted level at the first point.
     baseline: Math.exp(logFit.intercept) - offset,
     baselineSource: 'intercept',
   };
@@ -266,6 +297,7 @@ function round1(value: number): number {
   return Math.round(value * 10) / 10;
 }
 
+/** Indices of spike values by modified z-score (median and MAD), so news events do not become trends. */
 export function detectOutliers(values: number[], threshold: number = MODIFIED_Z_THRESHOLD): number[] {
   if (values.length < 3) {
     return [];
@@ -274,10 +306,12 @@ export function detectOutliers(values: number[], threshold: number = MODIFIED_Z_
   const center = median(values);
   let scale = mad(values);
 
+  // MAD is 0 when over half the values are equal (e.g. many zero days); fall back to the mean absolute deviation.
   if (scale === 0) {
     scale = mean(values.map((value) => Math.abs(value - center))) / MAD_TO_SIGMA;
   }
 
+  // A constant series has no spikes.
   if (scale === 0) {
     return [];
   }
@@ -295,6 +329,7 @@ export function detectOutliers(values: number[], threshold: number = MODIFIED_Z_
   return indices;
 }
 
+/** Centred moving median, shrinking at the edges; the robust trend line for seasonality. */
 export function movingMedian(values: number[], window: number): number[] {
   const half = Math.floor(window / 2);
 
@@ -306,6 +341,7 @@ export function movingMedian(values: number[], window: number): number[] {
   });
 }
 
+/** Yearly seasonal profile (moving-median trend, mean detrended value per day of year) and its strength. */
 export function seasonality(values: number[], period: number = YEAR_DAYS): SeasonalityResult {
   const cyclesAvailable = Math.round((values.length / period) * 100) / 100;
 
@@ -322,6 +358,7 @@ export function seasonality(values: number[], period: number = YEAR_DAYS): Seaso
     };
   }
 
+  // An odd window keeps the moving median centred on each day.
   const trend = movingMedian(values, period % 2 === 0 ? period + 1 : period);
   const detrended = values.map((value, index) => value - (trend[index] ?? 0));
   const buckets: number[][] = Array.from({ length: period }, () => []);
@@ -331,6 +368,7 @@ export function seasonality(values: number[], period: number = YEAR_DAYS): Seaso
   });
 
   const rawProfile = buckets.map((bucket) => (bucket.length > 0 ? mean(bucket) : 0));
+  // Centre the profile so it only redistributes views across the year and does not shift the level.
   const profileCenter = mean(rawProfile);
   const profile = rawProfile.map((value) => value - profileCenter);
   const seasonal = values.map((_, index) => profile[index % period] ?? 0);
@@ -341,6 +379,7 @@ export function seasonality(values: number[], period: number = YEAR_DAYS): Seaso
   const varBefore = stdev(residualBefore) ** 2;
   const varAfter = stdev(residualAfter) ** 2;
   const rawStrength = varBefore === 0 ? 0 : 1 - varAfter / varBefore;
+  // A profile with one free value per period removes about period/n of the variance even from noise; discount that.
   const byChance = Math.min(0.99, period / values.length);
   const strength = Math.max(0, Math.min(1, (rawStrength - byChance) / (1 - byChance)));
 
@@ -356,6 +395,7 @@ export function seasonality(values: number[], period: number = YEAR_DAYS): Seaso
   };
 }
 
+/** Percent change of the median of the last 365 days vs the previous 365; needs 730 days. */
 export function yoyChange(values: number[], dates: string[]): YoyResult {
   const n = values.length;
 
@@ -379,6 +419,7 @@ export function yoyChange(values: number[], dates: string[]): YoyResult {
   const current = median(values.slice(n - YEAR_DAYS));
   const previous = median(values.slice(n - 2 * YEAR_DAYS, n - YEAR_DAYS));
 
+  // A zero previous-year median has no meaningful percent change.
   if (previous === 0) {
     return {
       changePercent: null,
@@ -398,6 +439,7 @@ export function yoyChange(values: number[], dates: string[]): YoyResult {
   };
 }
 
+/** Descriptive summary of a series for the output. */
 export function summarize(values: number[]): Summary {
   const average = mean(values);
 

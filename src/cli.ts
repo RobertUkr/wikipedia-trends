@@ -11,6 +11,7 @@ import { contactWarning } from './lib/wikimedia.js';
 import type { Locale } from './lib/messages.js';
 import { SkillError } from './types.js';
 
+// The agent reads stdout whole, so every command prints at most this many lines.
 const MAX_STDOUT_LINES = 40;
 
 const USAGE = {
@@ -24,6 +25,7 @@ const USAGE = {
   report: 'report --qid Q123 --langs en,de,uk --from YYYY-MM-DD --to YYYY-MM-DD [--locale uk|en] [--artifact path.json]',
 };
 
+// Pretty-prints down to the cutoff depth and keeps anything deeper on one line.
 function render(value: unknown, depth: number, indent: string, cutoff: number): string {
   if (depth >= cutoff || value === null || typeof value !== 'object') {
     return JSON.stringify(value) ?? 'null';
@@ -48,6 +50,7 @@ function render(value: unknown, depth: number, indent: string, cutoff: number): 
   return `{\n${rendered.join(',\n')}\n${indent}}`;
 }
 
+// Folds ever shallower nesting until the JSON fits MAX_STDOUT_LINES, one line as a last resort.
 function fit(value: unknown): string {
   const pretty = JSON.stringify(value, null, 2);
 
@@ -70,6 +73,7 @@ function print(value: unknown): void {
   process.stdout.write(`${fit(value)}\n`);
 }
 
+// Errors are JSON on stdout as well, so the agent can relay error.message.
 function fail(command: string, error: unknown): never {
   if (error instanceof SkillError) {
     print({ ok: false, command, error: { code: error.code, message: error.message, details: error.details } });

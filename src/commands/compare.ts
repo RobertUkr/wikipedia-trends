@@ -11,14 +11,17 @@ import { ARTIFACT_SCHEMA, analyzeLanguage, trendReport } from './analyze.js';
 import type { LanguageAnalysis } from './analyze.js';
 import type { Direction } from '../lib/stats.js';
 
+/** Weights of the perspective score: growth, level of attention and confidence. */
 export const WEIGHTS = { growth: 0.5, level: 0.3, confidence: 0.2 } as const;
 
+/** Plain-text ranking criterion, echoed in the output so the ranking explains itself. */
 export const CRITERION =
   'perspective = 0.5*growth + 0.3*level + 0.2*confidence. growth is the Theil-Sen trend in %/year and level is the ' +
   'median views per million of the edition traffic; both are min-max scaled across the compared languages only, so ' +
   'the score ranks these languages against each other and says nothing in absolute terms. confidence is the composite ' +
   'confidence score of that language.';
 
+/** Arguments of the compare command. */
 export interface CompareArgs {
   qid: string;
   langs: Lang[];
@@ -29,6 +32,7 @@ export interface CompareArgs {
   locale: Locale | null;
 }
 
+/** One language's row in the ranking: trend, confidence, perspective score and notes. */
 export interface RankedLanguage {
   rank: number;
   lang: Lang;
@@ -46,6 +50,7 @@ export interface RankedLanguage {
   notes: Message[];
 }
 
+/** Compact stdout JSON of the compare command; per-language series go to the artifact file. */
 export interface CompareOutput {
   ok: true;
   command: 'compare';
@@ -63,6 +68,7 @@ export interface CompareOutput {
   file: string;
 }
 
+/** Min-max scales values to 0..1; a single value or all-equal values get a neutral 0.5. */
 export function minMaxScale(values: number[]): number[] {
   if (values.length <= 1) {
     return values.map(() => 0.5);
@@ -78,14 +84,17 @@ export function minMaxScale(values: number[]): number[] {
   return values.map((value) => (value - min) / (max - min));
 }
 
+/** Ranks languages by perspective = 0.5 growth + 0.3 level + 0.2 confidence, relative to each other only. */
 export function rank(analyses: LanguageAnalysis[]): RankedLanguage[] {
   const measured = analyses.filter((item) => item.trend.percentPerYear !== null);
   const scaled = minMaxScale(measured.map((item) => item.trend.percentPerYear as number));
+  // A language without a measurable growth rate gets 0 growth, not a neutral score.
   const growth = analyses.map((item) => {
     const position = measured.indexOf(item);
 
     return position === -1 ? 0 : (scaled[position] ?? 0.5);
   });
+  // Level is scaled only among per-million languages; raw counts are not comparable and get a neutral 0.5.
   const perMillion = analyses.filter((item) => item.unit === 'views_per_million');
   const scaledLevel = minMaxScale(perMillion.map((item) => item.level.median));
   const level = analyses.map((item) => {
@@ -140,6 +149,7 @@ export function rank(analyses: LanguageAnalysis[]): RankedLanguage[] {
     .map((item, index) => ({ ...item, rank: index + 1 }));
 }
 
+/** compare command: analyses each edition and ranks them; editions that drop out go to unavailable with a reason. */
 export async function runCompare(args: CompareArgs): Promise<CompareOutput> {
   if (!/^Q\d+$/.test(args.qid)) {
     throw new SkillError('InvalidInput', `--qid "${args.qid}" is not a Wikidata item id`, { qid: args.qid });
@@ -171,6 +181,7 @@ export async function runCompare(args: CompareArgs): Promise<CompareOutput> {
     try {
       analyses.push(await analyzeLanguage(args.qid, lang, title, args.from, args.to, args.noCache));
     } catch (error) {
+      // A language that cannot be analysed is a finding about that language, not a failure of the comparison.
       if (error instanceof SkillError) {
         unavailable.push({
           lang,
@@ -293,11 +304,13 @@ export async function runCompare(args: CompareArgs): Promise<CompareOutput> {
   };
 }
 
+/** Caveats about the comparison as a whole, summarising per-language problems. */
 export function buildCompareCaveats(analyses: LanguageAnalysis[], comparable: boolean): Message[] {
   const caveats: Message[] = [];
   const weak = analyses.filter((item) => item.confidence.overall === 'low').map((item) => item.lang);
   const undecided = analyses.filter((item) => item.trend.direction === 'inconclusive').map((item) => item.lang);
   const spiky = analyses.filter((item) => item.outlierIndices.length > 0);
+  // Declining means the whole interval is below zero, not just a negative point estimate.
   const declining = analyses.filter((item) => (item.trend.percentPerYear ?? 0) < 0 && item.fit.ci95[1] < 0);
 
   if (!comparable) {

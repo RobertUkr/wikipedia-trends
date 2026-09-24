@@ -29,13 +29,20 @@ import { ArticleNotFound, SkillError } from '../types.js';
 import type { DailyPoint, Lang, Message } from '../types.js';
 import { loadRevisionComments, loadSeries, loadTotals } from './fetch.js';
 
+/** Fewest days in range for which a trend is attempted at all. */
 export const MIN_ANALYSIS_DAYS = 30;
+/** Version of the analyze/compare artifacts; report reuses only artifacts of this version. */
 export const ARTIFACT_SCHEMA = 5;
+/** Longest gap at either end of the series before the analysis refuses with ShortHistory. */
 export const MAX_EDGE_GAP_DAYS = 90;
+/** How many former-title candidates are checked against the move log for one rename. */
 export const MAX_MOVE_LOOKUPS = 5;
+/** How many days a Wikidata sitelink update may trail the actual page move. */
 export const MAX_RENAME_LAG_DAYS = 30;
+/** Fewest weeks in the recent window for a recent trend to be fitted. */
 export const MIN_RECENT_WEEKS = 4;
 
+/** Rounded trend of one series for artifacts and stdout: %/year with its 95% interval plus the weekly linear fit. */
 export interface TrendReport {
   percentPerYear: number | null;
   ci95: [number, number] | null;
@@ -51,6 +58,7 @@ function spansZero(ci: [number, number]): boolean {
   return ci[0] <= 0 && ci[1] >= 0;
 }
 
+/** Rounds a Theil-Sen fit and its %/year trend into a TrendReport. */
 export function trendReport(fit: TrendFit, trend: TrendPercent): TrendReport {
   return {
     percentPerYear: trend.percentPerYear,
@@ -64,6 +72,7 @@ export function trendReport(fit: TrendFit, trend: TrendPercent): TrendReport {
   };
 }
 
+/** Arguments of the analyze command. */
 export interface AnalyzeArgs {
   qid: string;
   lang: Lang;
@@ -74,6 +83,7 @@ export interface AnalyzeArgs {
   locale: Locale | null;
 }
 
+/** Full in-memory analysis of one language edition, shared by analyze and compare. */
 export interface LanguageAnalysis {
   lang: Lang;
   project: string;
@@ -105,6 +115,7 @@ export interface LanguageAnalysis {
   totalsAvailable: boolean;
 }
 
+/** Compact stdout JSON of the analyze command; the full series goes to the artifact file. */
 export interface AnalyzeOutput {
   ok: true;
   command: 'analyze';
@@ -130,6 +141,7 @@ export interface AnalyzeOutput {
   file: string;
 }
 
+/** Trend, confidence and caveats for one edition's article, following its renames within the range. */
 export async function analyzeLanguage(
   qid: string,
   lang: Lang,
@@ -140,21 +152,26 @@ export async function analyzeLanguage(
 ): Promise<LanguageAnalysis> {
   const project = normalizeProject(lang);
   const site = `${lang.replace(/-/g, '_')}wiki`;
+  // Wikidata sitelink history tells which title the article had on which day.
   const history = await loadRevisionComments(qid, from, noCache).catch(() => [] as RevisionComment[]);
   const events = history
     .map((revision) => parseSitelinkEvent(revision.comment, revision.timestamp, site))
     .filter((event): event is SitelinkEvent => event !== null);
   const firstSet = events.filter((event) => event.kind === 'set').sort((a, b) => a.at.localeCompare(b.at))[0];
 
+  // The earliest sitelink edit falls inside the range but does not name the old title, so it is recovered from the wiki.
   if (firstSet && firstSet.previous === null && firstSet.title && firstSet.date > from) {
     const renamedAt = Date.parse(firstSet.at);
+    // A move leaves the old title as a redirect: candidates are redirects to the new title, closest to the rename first.
     const redirects = (await getRedirectsTo(project, firstSet.title).catch(() => []))
       .sort((a, b) => Math.abs(Date.parse(a.lastEdited) - renamedAt) - Math.abs(Date.parse(b.lastEdited) - renamedAt))
       .map((redirect) => redirect.title);
     const seen = [...new Set([...events.map((event) => event.title), ...redirects].filter((value): value is string => !!value))];
 
+    // The sitelink may be updated up to MAX_RENAME_LAG_DAYS after the actual move.
     const earliest = new Date(renamedAt - MAX_RENAME_LAG_DAYS * 86400000).toISOString().slice(0, 10);
 
+    // A candidate is confirmed only by a logged move to the new title; the switch is then dated to the move itself.
     for (const candidate of seen.filter((value) => value !== firstSet.title).slice(0, MAX_MOVE_LOOKUPS)) {
       const moves = await getMovesFrom(project, candidate).catch(() => []);
       const move = moves
@@ -169,6 +186,7 @@ export async function analyzeLanguage(
     }
   }
 
+  // Each title is fetched only for the days it was the title of this article.
   const windows = titleWindows(events, title, from, to);
   const parts: DailyPoint[][] = [];
   const unknownDays = new Set<string>();
@@ -181,6 +199,7 @@ export async function analyzeLanguage(
         throw error;
       }
 
+      // No data under a former title: these days are gaps, not zero views.
       for (const date of enumerateDates(window.from, window.to)) {
         unknownDays.add(date);
       }
@@ -208,6 +227,7 @@ export async function analyzeLanguage(
   const edgeGap = (value: NormalizedSeries) => Math.max(value.leadingGapDays, value.trailingGapDays);
   const series = normalizeSeries(merged, totalsPoints, from, to, unknownDays);
 
+  // A long gap at an edge usually means an untraced rename, a late creation or a merge; a trend on it would mislead.
   if (edgeGap(series) > MAX_EDGE_GAP_DAYS) {
     const first = series.dates[series.leadingGapDays] ?? to;
     const last = series.dates[series.dates.length - 1 - series.trailingGapDays] ?? from;
@@ -227,13 +247,16 @@ export async function analyzeLanguage(
     );
   }
 
+  // This daily fit only finds spike days by their residuals; it is not the trend.
   const firstFit = theilSen(toPoints(series.values));
   const residuals = series.values.map((value, index) => value - (firstFit.intercept + firstFit.slope * index));
   const outlierIndices = detectOutliers(residuals);
   const outlierSet = new Set(outlierIndices);
 
+  // Spikes are interpolated away so a news event does not become a trend.
   const repaired = interpolate(series.values.map((value, index) => (outlierSet.has(index) ? null : value))).values;
   const repairedRaw = interpolate(series.rawValues.map((value, index) => (outlierSet.has(index) ? null : value))).values;
+  // Daily views are autocorrelated and give too narrow an interval, so the trend is fitted on weekly sums.
   const weekly = aggregateWeekly(repaired, series.dates);
   const weeklyAbsolute = aggregateWeekly(repairedRaw, series.dates);
 
@@ -251,15 +274,19 @@ export async function analyzeLanguage(
   const relativeFit = normalized ? theilSen(toPoints(weekly.values)) : null;
   const relativeTrend = relativeFit ? trendPercentPerYear(weekly.values, WEEKS_PER_YEAR) : null;
 
+  // The relative (per-million) trend is the verdict; the absolute one also carries the edition's own movement.
+  // Without edition totals only the absolute trend exists and it becomes the primary one.
   const fit = relativeFit ?? absoluteFit;
   const trend = relativeTrend ?? absoluteTrend;
   const primaryWeekly = normalized ? weekly : weeklyAbsolute;
 
+  // The recent trend is fitted on the last third of the weekly series.
   const recentStart = Math.floor((primaryWeekly.values.length * 2) / 3);
   const recentValues = primaryWeekly.values.slice(recentStart);
   const recentFit = recentValues.length >= MIN_RECENT_WEEKS ? theilSen(toPoints(recentValues)) : null;
   const recentTrend = recentFit ? trendPercentPerYear(recentValues, WEEKS_PER_YEAR) : null;
 
+  // A reversal counts only when both the whole-period and the recent interval exclude zero.
   const reversal =
     recentFit !== null &&
     recentTrend?.percentPerYear !== null &&
@@ -333,6 +360,7 @@ export async function analyzeLanguage(
   };
 }
 
+/** analyze command: one edition's trend and confidence, with the full analysis saved as an artifact for report. */
 export async function runAnalyze(args: AnalyzeArgs): Promise<AnalyzeOutput> {
   if (!/^Q\d+$/.test(args.qid)) {
     throw new SkillError('InvalidInput', `--qid "${args.qid}" is not a Wikidata item id`, { qid: args.qid });

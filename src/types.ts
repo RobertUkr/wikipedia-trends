@@ -1,9 +1,14 @@
+/** Wikipedia language edition code, e.g. "uk" or "zh-min-nan". */
 export type Lang = string;
 
+/** Pageviews API access filter: desktop and mobile combined. */
 export const ACCESS = 'all-access';
+/** Pageviews API agent filter: human readers only, excluding spiders and detected automated traffic. */
 export const AGENT = 'user';
+/** Pageviews API granularity: one data point per day. */
 export const GRANULARITY = 'daily';
 
+/** A Wikidata item considered for the topic; wikiCount is how many Wikipedia editions have an article on it. */
 export interface TopicCandidate {
   qid: string;
   label: string;
@@ -12,21 +17,26 @@ export interface TopicCandidate {
   wikiCount: number;
 }
 
+/** Resolved topic: the chosen Wikidata item, its article title per language and the alternatives. */
 export interface TopicResolution {
   qid: string;
   label: string;
   description: string;
   titles: Record<Lang, string>;
   candidates: TopicCandidate[];
+  /** Remaining inspected items with their titles, used to suggest better-covered alternatives. */
   others: Array<TopicCandidate & { titles: Record<Lang, string> }>;
+  /** Whether the item came from Wikidata search or from the Wikipedia article search fallback. */
   matchedBy: 'wikidata' | 'article_search';
 }
 
+/** Views on one day; date is YYYY-MM-DD. */
 export interface DailyPoint {
   date: string;
   views: number;
 }
 
+/** Daily pageviews of one article in one edition. */
 export interface ArticleViews {
   project: string;
   title: string;
@@ -36,6 +46,7 @@ export interface ArticleViews {
   points: DailyPoint[];
 }
 
+/** Daily pageviews of a whole edition, used to turn article views into a share per million. */
 export interface ProjectTotals {
   project: string;
   access: string;
@@ -44,6 +55,7 @@ export interface ProjectTotals {
   points: DailyPoint[];
 }
 
+/** Codes of localized texts (caveats, verdicts, report and chart labels); en/uk dictionaries live in lib/messages.ts. */
 export type MessageCode =
   | 'LOW_VOLUME'
   | 'SERIES_TOO_SHORT'
@@ -152,19 +164,23 @@ export type MessageCode =
   | 'CHART_RECENT_MARKER'
   | 'CHART_NO_DATA';
 
+/** Value substituted into a message; can itself be a nested message. */
 export type MessageParam = string | number | Message;
 
+/** Language-neutral message, rendered to text by lib/messages.ts. */
 export interface Message {
   code: MessageCode;
   params: Record<string, MessageParam>;
 }
 
+/** One Wikipedia full-text search hit; snippet is plain text. */
 export interface ArticleSearchHit {
   title: string;
   pageid: number;
   snippet: string;
 }
 
+/** Wikipedia full-text search result; totalHits counts all matches, not only the returned hits. */
 export interface ArticleSearchResult {
   project: string;
   query: string;
@@ -172,6 +188,7 @@ export interface ArticleSearchResult {
   hits: ArticleSearchHit[];
 }
 
+/** Whether a language edition could be analysed and, if not, why. */
 export type LanguageStatus =
   | 'available'
   | 'short_history'
@@ -180,6 +197,7 @@ export type LanguageStatus =
   | 'no_data'
   | 'fetch_failed';
 
+/** Similarly titled article found by search; never used without the user's confirmation. */
 export interface AlternativeArticle {
   title: string;
   score: number;
@@ -188,6 +206,7 @@ export interface AlternativeArticle {
   confirmed: false;
 }
 
+/** A language that yields no trend, with the reason and any search alternatives. */
 export interface LanguageAvailability {
   lang: Lang;
   project: string;
@@ -200,6 +219,7 @@ export interface LanguageAvailability {
   alternatives: AlternativeArticle[];
 }
 
+/** Machine-readable error codes reported by the CLI. */
 export type ErrorCode =
   | 'InvalidInput'
   | 'TopicNotFound'
@@ -209,6 +229,7 @@ export type ErrorCode =
   | 'HttpError'
   | 'NetworkError';
 
+/** Base CLI error with a machine-readable code and structured details. */
 export class SkillError extends Error {
   readonly code: ErrorCode;
   readonly details: Record<string, unknown>;
@@ -221,6 +242,7 @@ export class SkillError extends Error {
   }
 }
 
+/** Non-success HTTP response; the body kept in details is truncated to 200 characters. */
 export class HttpError extends SkillError {
   readonly status: number;
 
@@ -230,6 +252,7 @@ export class HttpError extends SkillError {
   }
 }
 
+/** The Pageviews API has no data for the article in the requested range. */
 export class ArticleNotFound extends SkillError {
   constructor(project: string, title: string, start: string, end: string) {
     super('ArticleNotFound', `No pageviews data for "${title}" on ${project} between ${start} and ${end}`, {
@@ -241,12 +264,14 @@ export class ArticleNotFound extends SkillError {
   }
 }
 
+/** No Wikidata item matches the topic query. */
 export class TopicNotFound extends SkillError {
   constructor(query: string, lang: string) {
     super('TopicNotFound', `Wikidata has no item matching "${query}" (search language: ${lang})`, { query, lang });
   }
 }
 
+/** Request failed without an HTTP response, e.g. a connection error or timeout. */
 export class NetworkError extends SkillError {
   constructor(url: string, cause: unknown) {
     super('NetworkError', `Request to ${url} failed: ${cause instanceof Error ? cause.message : String(cause)}`, {

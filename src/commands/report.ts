@@ -11,6 +11,7 @@ import type { Lang, Message } from '../types.js';
 import { ARTIFACT_SCHEMA, runAnalyze } from './analyze.js';
 import { runCompare } from './compare.js';
 
+/** Arguments of the report command; topic, fileName and unavailable are passed by research. */
 export interface ReportArgs {
   qid: string;
   langs: Lang[];
@@ -24,6 +25,7 @@ export interface ReportArgs {
   unavailable?: Array<{ lang: string; reason: string }>;
 }
 
+/** Result of the report command: PDF and chart paths and whether an existing artifact was reused. */
 export interface ReportOutput {
   ok: true;
   command: 'report';
@@ -38,6 +40,7 @@ export interface ReportOutput {
   headline: string;
 }
 
+// analyze and compare artifacts store some fields differently, hence the optional ones.
 interface StoredLanguage {
   lang: string;
   title: string;
@@ -69,6 +72,7 @@ interface StoredArtifact extends Partial<StoredLanguage> {
   ranking?: Array<{ lang: string }>;
 }
 
+/** Default artifact path: the analyze file for one language, the compare file for several. */
 export function artifactPath(qid: string, langs: Lang[]): string {
   return langs.length === 1 ? join(outputDir(), `analyze-${qid}-${langs[0]}.json`) : join(outputDir(), `compare-${qid}.json`);
 }
@@ -83,6 +87,7 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
+/** An artifact is reused only with the current schema, the same range and every requested language. */
 export function isUsable(artifact: StoredArtifact, langs: Lang[], from: string, to: string): boolean {
   if (artifact.schema !== ARTIFACT_SCHEMA || artifact.from !== from || artifact.to !== to) {
     return false;
@@ -114,6 +119,7 @@ function toLanguage(stored: StoredLanguage): ReportLanguage {
   };
 }
 
+/** Turns a stored artifact into report input for the requested languages, in the requested order. */
 export function toReportInput(
   artifact: StoredArtifact,
   langs: Lang[],
@@ -147,6 +153,7 @@ export function toReportInput(
   };
 }
 
+/** report command: renders the topic's PDF from a stored artifact, rerunning the analysis only if none is usable. */
 export async function runReport(args: ReportArgs): Promise<ReportOutput> {
   if (!/^Q\d+$/.test(args.qid)) {
     throw new SkillError('InvalidInput', `--qid "${args.qid}" is not a Wikidata item id`, { qid: args.qid });
@@ -169,6 +176,7 @@ export async function runReport(args: ReportArgs): Promise<ReportOutput> {
   }
 
   if (!artifactReused) {
+    // An artifact given explicitly is never silently replaced by a fresh analysis.
     if (args.artifact) {
       throw new SkillError('InvalidInput', `Artifact ${args.artifact} is missing, outdated or lacks ${args.langs.join(', ')}`, {
         artifact: args.artifact,
@@ -206,6 +214,7 @@ export async function runReport(args: ReportArgs): Promise<ReportOutput> {
     throw new SkillError('ArticleNotFound', `None of ${args.langs.join(', ')} has data in ${path}`, { artifact: path });
   }
 
+  // One PDF per topic, named after the English title and the QID, so follow-ups update the same file.
   const pdf = join(
     outputDir(),
     reportFileName(args.fileName ?? input.languages.find((item) => item.lang === 'en')?.title ?? args.qid, args.qid),

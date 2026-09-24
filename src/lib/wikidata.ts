@@ -12,14 +12,21 @@ import { normalizeProject, requestJson, searchArticles } from './wikimedia.js';
 import type { RequestOptions } from './wikimedia.js';
 
 const API = 'https://www.wikidata.org/w/api.php';
+// Wikidata search results fetched; only the top INSPECT_LIMIT are checked for sitelinks.
 const SEARCH_LIMIT = 7;
 const INSPECT_LIMIT = 5;
+// Candidates scoring within this of the top one are treated as competing matches.
 const AMBIGUITY_DELTA = 0.12;
+// A competing match needs at least 20% of the best-linked candidate's editions, so obscure namesakes do not make a topic ambiguous.
 const NOTABILITY_RATIO = 0.2;
+// Search hits checked per language that has no sitelink.
 const SEARCH_HITS = 5;
+// Minimum title similarity for a search hit to be offered as a possible alternative.
 const ALTERNATIVE_MIN_SCORE = 0.5;
 
+// Wikipedia sitelink keys such as "ukwiki" or "zh_min_nanwiki"; sister projects like "ukwikiquote" do not match.
 const WIKI_SITE = /^([a-z0-9_-]+)wiki$/;
+// Wikimedia wikis whose site id ends in "wiki" but which are not language editions of Wikipedia.
 const NON_LANGUAGE_WIKIS = new Set([
   'commons',
   'species',
@@ -73,6 +80,7 @@ function normalize(value: string | undefined): string {
   return (value ?? '').trim().toLowerCase();
 }
 
+/** Relevance of a Wikidata search entry to the query, from match quality, match type and search rank. */
 export function scoreEntry(query: string, entry: SearchEntry, index: number): number {
   const target = normalize(query);
   const label = normalize(entry.label);
@@ -93,10 +101,12 @@ export function scoreEntry(query: string, entry: SearchEntry, index: number): nu
     score += 0.1;
   }
 
+  // Rank bonus: 0.2 for the first result, nothing from the fifth on.
   score += Math.max(0, 0.2 - index * 0.05);
   return Math.round(score * 1000) / 1000;
 }
 
+/** Article title per language edition from Wikidata sitelinks, skipping sister projects and non-language wikis. */
 export function sitelinksToTitles(sitelinks: Record<string, { site?: string; title?: string }>): Record<Lang, string> {
   const titles: Record<Lang, string> = {};
   for (const [site, link] of Object.entries(sitelinks)) {
@@ -109,11 +119,13 @@ export function sitelinksToTitles(sitelinks: Record<string, { site?: string; tit
     if (NON_LANGUAGE_WIKIS.has(prefix)) {
       continue;
     }
+    // Site ids use underscores where language codes use hyphens: zh_min_nanwiki -> zh-min-nan.
     titles[prefix.replace(/_/g, '-')] = title;
   }
   return titles;
 }
 
+// One wbgetentities call covers all candidates, saving requests.
 async function fetchSitelinkMap(
   qids: string[],
   opts: RequestOptions,
@@ -149,6 +161,7 @@ export async function getSitelinks(qid: string, opts: RequestOptions = {}): Prom
   return titles;
 }
 
+/** Resolves a topic query to a Wikidata item and its articles, falling back to Wikipedia search for phrases. */
 export async function resolveTopic(
   query: string,
   sourceLang: string,
@@ -197,6 +210,7 @@ export async function resolveTopic(
     opts,
   );
 
+  // Items without Wikipedia articles and disambiguation pages cannot be analysed.
   const candidates: TopicCandidate[] = inspected
     .map((item) => ({
       qid: item.entry.id,
@@ -206,6 +220,7 @@ export async function resolveTopic(
       wikiCount: Object.keys(sitelinkMap[item.entry.id] ?? {}).length,
     }))
     .filter((candidate) => candidate.wikiCount > 0 && !isDisambiguation(candidate, sitelinkMap[candidate.qid] ?? {}));
+  // An item whose source-language article is titled exactly like the query stays in contention regardless of score.
   const namesArticle = (candidate: TopicCandidate) =>
     normalize(sitelinkMap[candidate.qid]?.[sourceLang]) === normalize(trimmed);
 
@@ -222,6 +237,7 @@ export async function resolveTopic(
   const byScore = candidates.filter(
     (candidate) => top.score - candidate.score <= AMBIGUITY_DELTA || namesArticle(candidate),
   );
+  // Of the competing matches, keep only those comparably notable to the best-linked one.
   const mostLinked = Math.max(...byScore.map((candidate) => candidate.wikiCount));
   const close = byScore
     .filter((candidate) => candidate.wikiCount >= mostLinked * NOTABILITY_RATIO)
@@ -233,6 +249,7 @@ export async function resolveTopic(
     label: best.label,
     description: best.description,
     titles: sitelinkMap[best.qid] ?? {},
+    // Candidates are returned only when the user has a real choice to make.
     candidates: close.length > 1 ? close : [],
     others: candidates
       .filter((candidate) => candidate.qid !== best.qid)
@@ -253,6 +270,7 @@ interface ArticleEntitiesResponse {
   >;
 }
 
+/** Fallback for phrases that are not item labels: Wikipedia search hits mapped to their Wikidata items. */
 export async function resolveByArticleSearch(
   query: string,
   sourceLang: string,
@@ -263,6 +281,7 @@ export async function resolveByArticleSearch(
     return null;
   }
 
+  // Wikidata site id of the edition, e.g. zh-min-nan -> zh_min_nanwiki.
   const site = `${sourceLang.replace(/-/g, '_')}wiki`;
   const url = `${API}?${new URLSearchParams({
     action: 'wbgetentities',
@@ -284,6 +303,7 @@ export async function resolveByArticleSearch(
   const titles: Record<string, Record<Lang, string>> = {};
   for (const hit of found.hits) {
     const entity = byTitle.get(hit.title);
+    // Hits without an item are skipped; several hits on one item keep only the first.
     if (!entity || titles[entity.id]) {
       continue;
     }
@@ -313,9 +333,12 @@ export async function resolveByArticleSearch(
   };
 }
 
+// Title qualifiers of disambiguation pages in en, uk, ru, pl, cs, de, fr and es.
 const DISAMBIGUATION_TITLE = /\((disambiguation|значення|значения|ujednoznacznienie|rozcestník|begriffsklärung|homonymie|desambiguación)\)$/i;
+// Wikidata descriptions of disambiguation items in en, uk, ru and pl.
 const DISAMBIGUATION_DESCRIPTION = /disambiguation|сторінка значень|страница значений|strona ujednoznaczniająca/i;
 
+/** Whether the item is a disambiguation page, judged by its description or any of its article titles. */
 export function isDisambiguation(candidate: TopicCandidate, titles: Record<Lang, string>): boolean {
   return (
     DISAMBIGUATION_DESCRIPTION.test(candidate.description) ||
@@ -323,6 +346,7 @@ export function isDisambiguation(candidate: TopicCandidate, titles: Record<Lang,
   );
 }
 
+/** Similarity of an article title to the query, from 1 for identical down to word overlap. */
 export function titleSimilarity(query: string, title: string): number {
   const left = normalize(query);
   const right = normalize(title);
@@ -333,6 +357,7 @@ export function titleSimilarity(query: string, title: string): number {
     return 1;
   }
 
+  // Ignore a trailing qualifier such as "(film)".
   const bare = right.replace(/\s*\([^)]*\)\s*$/, '').trim();
   if (left === bare) {
     return 0.9;
@@ -341,6 +366,7 @@ export function titleSimilarity(query: string, title: string): number {
     return 0.7;
   }
 
+  // Otherwise Jaccard similarity of the word sets.
   const leftTokens = new Set(left.split(/\s+/).filter(Boolean));
   const rightTokens = new Set(bare.split(/\s+/).filter(Boolean));
   const shared = [...leftTokens].filter((token) => rightTokens.has(token)).length;
@@ -348,6 +374,7 @@ export function titleSimilarity(query: string, title: string): number {
   return union === 0 ? 0 : Math.round((shared / union) * 100) / 100;
 }
 
+/** Classifies a language without a sitelink as no_article or possible_alternative from its search hits. */
 export function classifySearchResult(lang: Lang, query: string, result: ArticleSearchResult): LanguageAvailability {
   const project = normalizeProject(lang);
   const alternatives: AlternativeArticle[] = result.hits
@@ -391,6 +418,7 @@ export function classifySearchResult(lang: Lang, query: string, result: ArticleS
   };
 }
 
+/** Item label per language, falling back to the first alias; used as the search query in each edition. */
 export async function getLabels(
   qid: string,
   langs: Lang[],
@@ -420,6 +448,7 @@ export async function getLabels(
   return labels;
 }
 
+/** Checks languages without a sitelink by searching each edition for the item's label. */
 export async function probeLanguages(
   qid: string,
   langs: Lang[],
@@ -439,6 +468,7 @@ export async function probeLanguages(
       const search = await searchArticles(lang, query, SEARCH_HITS, opts);
       results.push(classifySearchResult(lang, query, search));
     } catch (error) {
+      // A failed search is reported for that language instead of aborting the others.
       results.push({
         lang,
         project: normalizeProject(lang),
@@ -459,8 +489,10 @@ export async function probeLanguages(
   return results;
 }
 
+/** Page limit when reading an item's revision history (500 revisions per page). */
 export const MAX_HISTORY_PAGES = 20;
 
+/** Edit summary of a Wikidata item revision, parsed for sitelink changes to trace renames. */
 export interface RevisionComment {
   timestamp: string;
   comment: string;
@@ -471,6 +503,7 @@ interface RevisionsResponse {
   query?: { pages?: Array<{ revisions?: Array<{ timestamp?: string; comment?: string }> }> };
 }
 
+/** Edit summaries of a Wikidata item, newest first, reaching back at least to the given date. */
 export async function getRevisionComments(qid: string, since: string, opts: RequestOptions = {}): Promise<RevisionComment[]> {
   const comments: RevisionComment[] = [];
   let next: string | undefined;
@@ -481,11 +514,13 @@ export async function getRevisionComments(qid: string, since: string, opts: Requ
       prop: 'revisions',
       titles: qid,
       rvprop: 'timestamp|comment',
+      // 500 is the per-request maximum for regular (non-bot) clients.
       rvlimit: '500',
       format: 'json',
       formatversion: '2',
     });
 
+    // Continue from where the previous page of older revisions ended.
     if (next) {
       params.set('rvcontinue', next);
     }
@@ -499,6 +534,7 @@ export async function getRevisionComments(qid: string, since: string, opts: Requ
     comments.push(...batch);
     next = payload.continue?.rvcontinue;
 
+    // Revisions come newest first, so stop once a page reaches past the start date.
     if (!next || (batch.at(-1)?.timestamp ?? '') < since) {
       break;
     }

@@ -1,10 +1,14 @@
 import type { Message, MessageCode, MessageParam } from '../types.js';
 
+/** Language of rendered report and CLI text. */
 export type Locale = 'en' | 'uk';
 
+/** Every supported locale. */
 export const LOCALES: Locale[] = ['en', 'uk'];
+/** Locale used when none is requested. */
 export const DEFAULT_LOCALE: Locale = 'en';
 
+/** English templates with `{param}` placeholders; typed over every MessageCode, so a missing entry fails to compile. */
 const EN: Record<MessageCode, string> = {
   TRUST_LOW:
     'Trust ({lang}): confidence is low; the weakest part is {weakest}: {detail}. Do not base a decision on this ' +
@@ -174,6 +178,7 @@ const EN: Record<MessageCode, string> = {
     'seasonality needs {required} full cycles to be identifiable, the series has {cyclesAvailable}',
 };
 
+/** Ukrainian templates; same codes and placeholders as EN. */
 const UK: Record<MessageCode, string> = {
   TRUST_LOW:
     'Довіра ({lang}): достовірність низька, найслабша складова — {weakest}: {detail}. Самостійно рішення на цьому ' +
@@ -342,12 +347,15 @@ const UK: Record<MessageCode, string> = {
     'щоб сезонність була ідентифікованою, потрібно {required} повних цикли, у ряді їх {cyclesAvailable}',
 };
 
+/** Message templates per locale. */
 export const DICTIONARIES: Record<Locale, Record<MessageCode, string>> = { en: EN, uk: UK };
 
+/** Type guard for a supported locale string. */
 export function isLocale(value: string): value is Locale {
   return (LOCALES as string[]).includes(value);
 }
 
+/** Renders a message; nested message params render in the same locale, unknown placeholders stay as written. */
 export function render(message: Message, locale: Locale = DEFAULT_LOCALE): string {
   const template = DICTIONARIES[locale][message.code];
 
@@ -362,10 +370,12 @@ export function render(message: Message, locale: Locale = DEFAULT_LOCALE): strin
   });
 }
 
+/** Renders a list of messages in one locale. */
 export function renderAll(messages: Message[], locale: Locale = DEFAULT_LOCALE): string[] {
   return messages.map((message) => render(message, locale));
 }
 
+/** Builds a locale-independent message from a code and its params; wording is chosen only at render time. */
 export function message(code: MessageCode, params: Record<string, MessageParam> = {}): Message {
   return { code, params };
 }

@@ -14,14 +14,20 @@ import type { Locale } from './messages.js';
 import type { Direction } from './stats.js';
 import type { Message, MessageCode } from '../types.js';
 
+/** Regular PDF font: bundled DejaVu Sans, because the PDF standard fonts have no Cyrillic glyphs. */
 export const FONT_REGULAR = 'DejaVuSans';
+/** Bold counterpart of FONT_REGULAR. */
 export const FONT_BOLD = 'DejaVuSans-Bold';
+/** Page margin in points on every side. */
 export const PAGE_MARGIN = 36;
 
+// A4 in PDF points.
 const PAGE = { width: 595.28, height: 841.89 };
 const CONTENT_WIDTH = PAGE.width - PAGE_MARGIN * 2;
+// Kept free at the bottom of the page for the three footer lines.
 const FOOTER_HEIGHT = 40;
 
+/** Per-language caveats printed in the PDF, in print order; codes not listed are left off the page. */
 export const LANGUAGE_CAVEAT_PRIORITY: MessageCode[] = [
   'TREND_REVERSAL',
   'TITLE_HISTORY_MERGED',
@@ -35,10 +41,14 @@ export const LANGUAGE_CAVEAT_PRIORITY: MessageCode[] = [
   'RAW_COUNTS_NOT_COMPARABLE',
 ];
 
+/** Above this many languages the report switches to compact mode so it stays on one page. */
 export const COMPACT_FROM_LANGS = 4;
+/** Most languages one report holds and still fits a single page. */
 export const MAX_REPORT_LANGS = 8;
+/** Caveats that read the same for every language, so the PDF prints them once, not per language. */
 export const ONCE_PER_REPORT: MessageCode[] = ['TWO_TRENDS_EXPLAINED', 'WEEKLY_AGGREGATION'];
 
+/** A fitted trend: percent per year with its 95% interval, plus the weekly linear fit drawn on the chart. */
 export interface ReportTrend {
   percentPerYear: number | null;
   ci95: [number, number] | null;
@@ -48,18 +58,22 @@ export interface ReportTrend {
   ci95Slope: [number, number];
 }
 
+/** One day of the series in views per million, with its 7-day average used only for the chart. */
 export interface ReportPoint {
   date: string;
   perMillion: number | null;
   smoothed: number;
 }
 
+/** Everything the report shows for one language edition. */
 export interface ReportLanguage {
   lang: string;
   title: string;
+  // raw_views when edition totals were unavailable; such a language is not comparable and is left off the chart.
   unit: 'views_per_million' | 'raw_views';
   trend: ReportTrend;
   relativeTrend: ReportTrend | null;
+  // Same fit on the last third of the weekly series; `from` is where that period starts.
   recentTrend: (ReportTrend & { weeks: number; from: string | null }) | null;
   weeks: number;
   medianPerMillion: number;
@@ -75,6 +89,7 @@ export interface ReportLanguage {
   points: ReportPoint[];
 }
 
+/** Input for one PDF report: the topic, its languages, report-wide caveats and the compare ranking. */
 export interface ReportInput {
   qid: string;
   from: string;
@@ -88,6 +103,7 @@ export interface ReportInput {
   unavailable?: Array<{ lang: string; reason: string }>;
 }
 
+/** Paths of the written PDF and SVG chart, plus the headline that became the PDF subject. */
 export interface RenderedReport {
   pdf: string;
   svg: string;
@@ -107,14 +123,17 @@ const CONFIDENCE_CODES: Record<ConfidenceLevel, MessageCode> = {
   high: 'CONFIDENCE_HIGH',
 };
 
+/** Localisable word for a trend direction. */
 export function directionMessage(direction: Direction): Message {
   return message(DIRECTION_CODES[direction]);
 }
 
+/** Localisable word for a confidence level. */
 export function confidenceMessage(level: ConfidenceLevel): Message {
   return message(CONFIDENCE_CODES[level]);
 }
 
+/** Number with an explicit plus for positive values; an em dash when the value is missing. */
 export function signed(value: number | null): string {
   if (value === null) {
     return '—';
@@ -123,14 +142,17 @@ export function signed(value: number | null): string {
   return value > 0 ? `+${value}` : String(value);
 }
 
+/** Report topic: the article title in the report locale, else the English one, else the first available. */
 export function pickTopic(languages: Array<{ lang: string; title: string }>, locale: Locale, fallback: string): string {
   const preferred = languages.find((item) => item.lang === locale) ?? languages.find((item) => item.lang === 'en');
 
   return preferred?.title ?? languages[0]?.title ?? fallback;
 }
 
+/** PDF file name: an ASCII slug of the title plus the QID, or the QID alone when nothing Latin survives. */
 export function reportFileName(name: string, qid: string): string {
   const slug = name
+    // NFKD plus stripping combining marks turns accented Latin letters into plain ASCII.
     .normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
@@ -144,6 +166,7 @@ export function reportFileName(name: string, qid: string): string {
   return slug ? `${slug}-${id}.pdf` : `${id}.pdf`;
 }
 
+/** Headline verdict for the report, worded from the trend direction, never from the percent alone. */
 export function headline(input: ReportInput): Message {
   const languages = input.languages;
   const topic = input.topic;
@@ -151,6 +174,7 @@ export function headline(input: ReportInput): Message {
   if (languages.length === 1) {
     const only = languages[0] as ReportLanguage;
 
+    // The share of edition traffic is the measure of interest; raw views are only the fallback.
     const primary = only.relativeTrend ?? only.trend;
 
     return message('HEADLINE_SINGLE', {
@@ -167,6 +191,7 @@ export function headline(input: ReportInput): Message {
     });
   }
 
+  // Only a confirmed rise counts as growth; the fastest-growing language leads the headline.
   const growing = languages
     .filter((item) => item.trend.direction === 'up')
     .sort((a, b) => (b.trend.percentPerYear ?? 0) - (a.trend.percentPerYear ?? 0));
@@ -186,6 +211,7 @@ export function headline(input: ReportInput): Message {
   }
 
   if (languages.length > 0 && languages.every((item) => item.trend.direction === 'down')) {
+    // When everything declines, the named language is the slowest decline, which is still not growth.
     const slowest = [...languages].sort((a, b) => (b.trend.percentPerYear ?? 0) - (a.trend.percentPerYear ?? 0))[0];
 
     return message('HEADLINE_ALL_DOWN', {
@@ -217,6 +243,7 @@ export function headline(input: ReportInput): Message {
   });
 }
 
+// Also the tie-break: on equal scores the component listed first is reported as the weakest.
 const COMPONENT_ORDER: ComponentName[] = ['volume', 'stability', 'length', 'outlierShare', 'continuity'];
 
 const COMPONENT_CODES: Record<ComponentName, MessageCode> = {
@@ -233,6 +260,7 @@ const TRUST_CODES: Record<ConfidenceLevel, MessageCode> = {
   high: 'TRUST_HIGH',
 };
 
+/** Confidence component with the lowest score, i.e. the main reason to distrust the result. */
 export function weakestComponent(
   components: Record<ComponentName, ConfidenceComponent>,
 ): { name: ComponentName; component: ConfidenceComponent } {
@@ -247,6 +275,7 @@ export function weakestComponent(
   return { name: weakest, component: components[weakest] };
 }
 
+/** Trust line for one language naming its weakest confidence component; null when components are unknown. */
 export function trustLine(item: ReportLanguage): Message | null {
   if (!item.confidence.components) {
     return null;
@@ -261,6 +290,7 @@ export function trustLine(item: ReportLanguage): Message | null {
   });
 }
 
+/** Launch recommendation: a growing language whose confidence is not low; null for a single language. */
 export function recommendation(input: ReportInput): Message | null {
   const languages = input.languages;
 
@@ -271,6 +301,7 @@ export function recommendation(input: ReportInput): Message | null {
   const byGrowth = (a: ReportLanguage, b: ReportLanguage) =>
     (b.trend.percentPerYear ?? Number.NEGATIVE_INFINITY) - (a.trend.percentPerYear ?? Number.NEGATIVE_INFINITY);
   const growing = languages.filter((item) => item.trend.direction === 'up').sort(byGrowth);
+  // Growth measured with low confidence is not enough to recommend a language.
   const trusted = growing.find((item) => item.confidence.overall !== 'low');
 
   if (trusted) {
@@ -294,6 +325,7 @@ export function recommendation(input: ReportInput): Message | null {
   return message('RECOMMEND_NONE_NO_DIRECTION');
 }
 
+/** "What to check next" order from the compare ranking; null when there is nothing to order. */
 export function explorationOrder(input: ReportInput): Message | null {
   if (input.languages.length < 2 || input.ranking.length < 2) {
     return null;
@@ -302,6 +334,7 @@ export function explorationOrder(input: ReportInput): Message | null {
   return message('RECOMMEND_ORDER', { order: input.ranking.join(' → ') });
 }
 
+/** Lines under the headline: per-language trust lines, then the recommendation and the exploration order. */
 export function verdictLines(input: ReportInput): Message[] {
   const lines = input.languages.map(trustLine).filter((line): line is Message => line !== null);
 
@@ -312,7 +345,9 @@ function addDays(date: string, days: number): string {
   return new Date(Date.parse(`${date}T00:00:00Z`) + days * 86400000).toISOString().slice(0, 10);
 }
 
+/** Chart band for a weekly trend: fitted line and 95% slope interval, as per-day values at mid-week dates. */
 export function trendBand(trend: ReportTrend, weeks: number, from: string): TrendBand {
+  // The slope interval is pivoted on the middle of the series, so the band is narrowest there and fans out.
   const pivot = (weeks - 1) / 2;
   const pivotValue = trend.intercept + trend.slopePerWeek * pivot;
   const band: TrendBand = { dates: [], value: [], lower: [], upper: [] };
@@ -321,6 +356,7 @@ export function trendBand(trend: ReportTrend, weeks: number, from: string): Tren
     const low = pivotValue + trend.ci95Slope[0] * (week - pivot);
     const high = pivotValue + trend.ci95Slope[1] * (week - pivot);
 
+    // Weekly sums divided by 7 match the daily scale of the plotted points.
     band.dates.push(addDays(from, week * 7 + 3));
     band.value.push((trend.intercept + trend.slopePerWeek * week) / 7);
     band.lower.push(Math.min(low, high) / 7);
@@ -330,6 +366,7 @@ export function trendBand(trend: ReportTrend, weeks: number, from: string): Tren
   return band;
 }
 
+/** Chart series per language; raw-count languages are returned as excluded because their scale is not comparable. */
 export function chartSeries(input: ReportInput): { series: ChartSeries[]; excluded: string[] } {
   const series: ChartSeries[] = [];
   const excluded: string[] = [];
@@ -356,6 +393,7 @@ export function chartSeries(input: ReportInput): { series: ChartSeries[]; exclud
   return { series, excluded };
 }
 
+/** Caveats for the PDF: report-wide ones, each language's in priority order, then the once-per-report notes. */
 export function selectCaveats(input: ReportInput): Message[] {
   const selected: Message[] = [...input.caveats];
 
@@ -384,6 +422,7 @@ export function selectCaveats(input: ReportInput): Message[] {
   return selected;
 }
 
+/** Footer note listing, per language, the gap days that were filled in. */
 export function missingDaysDetail(input: ReportInput): Message {
   const gaps = input.languages.filter((item) => item.missingDays > 0);
 
@@ -396,6 +435,7 @@ export function missingDaysDetail(input: ReportInput): Message {
   });
 }
 
+/** Footer note listing, per language, the days with zero views; null when there are none. */
 export function zeroDaysDetail(input: ReportInput): Message | null {
   const zero = input.languages.filter((item) => (item.zeroDays ?? 0) > 0);
 
@@ -408,6 +448,7 @@ export function zeroDaysDetail(input: ReportInput): Message | null {
   });
 }
 
+/** Confidence cell: level with its score, or "lowered" when a caveat rule capped the level below the score. */
 export function confidenceCell(confidence: ReportLanguage['confidence']): Message {
   const level = confidenceMessage(confidence.overall);
 
@@ -441,11 +482,13 @@ function ciCell(trend: ReportTrend | null): string {
   return `[${signed(trend.ci95[0])}; ${signed(trend.ci95[1])}]`;
 }
 
+/** Renders the one-page A4 PDF report next to its SVG chart and returns both paths. */
 export async function renderReport(input: ReportInput, locale: Locale, pdfPath: string): Promise<RenderedReport> {
   const t = (code: MessageCode, params: Record<string, string | number | Message> = {}) =>
     render(message(code, params), locale);
 
   const { series, excluded } = chartSeries(input);
+  // The chart gets one marker: the start of the recent period of the first language that has one.
   const marker = input.languages.find((item) => item.recentTrend?.from)?.recentTrend?.from ?? null;
   const svg = lineChart(series, {
     width: CHART_WIDTH,
@@ -497,6 +540,7 @@ export async function renderReport(input: ReportInput, locale: Locale, pdfPath: 
   doc.font(FONT_BOLD).fontSize(11).fillColor('#111827').text(render(summary, locale), left, y, { width: CONTENT_WIDTH });
   y = doc.y + 4;
 
+  // With many languages, per-language trust lines and article titles are dropped so the page still fits.
   const compact = input.languages.length > COMPACT_FROM_LANGS;
   const lines = compact ? [recommendation(input), explorationOrder(input)].filter((line): line is Message => line !== null) : verdictLines(input);
 
@@ -510,6 +554,7 @@ export async function renderReport(input: ReportInput, locale: Locale, pdfPath: 
   SVGtoPDF(doc, svg, left + (CONTENT_WIDTH - CHART_WIDTH) / 2, y, {
     width: CHART_WIDTH,
     height: CHART_HEIGHT,
+    // Every SVG font maps to the embedded DejaVu, so Cyrillic labels render in the PDF.
     fontCallback: (_family: string, bold: boolean) => (bold ? FONT_BOLD : FONT_REGULAR),
   });
   y += CHART_HEIGHT + 6;
@@ -521,6 +566,7 @@ export async function renderReport(input: ReportInput, locale: Locale, pdfPath: 
     y = doc.y + 4;
   }
 
+  // Widths in points; the last column takes whatever is left of the content width.
   const columns = [
     { label: t('REPORT_TABLE_LANG'), width: 112 },
     { label: t('REPORT_TABLE_RELATIVE'), width: 104 },
@@ -535,6 +581,7 @@ export async function renderReport(input: ReportInput, locale: Locale, pdfPath: 
     const firstWidth = (columns[0]?.width ?? 60) - 6;
     const subtitleHeight = subtitle ? doc.font(FONT_REGULAR).fontSize(7).heightOfString(subtitle, { width: firstWidth }) : 0;
     doc.font(bold ? FONT_BOLD : FONT_REGULAR).fontSize(8);
+    // The first cell also carries the article title under the language code, so it counts both.
     const height =
       Math.max(
         ...cells.map((cell, index) => doc.heightOfString(cell, { width: (columns[index]?.width ?? 60) - 6 })),
@@ -600,6 +647,7 @@ export async function renderReport(input: ReportInput, locale: Locale, pdfPath: 
   y = doc.y + 3;
 
   const caveats = selectCaveats(input);
+  // Caveats stop above the footer; the rest are counted in a "more caveats" line.
   const limit = PAGE.height - PAGE_MARGIN - FOOTER_HEIGHT;
   let shown = 0;
 
@@ -608,6 +656,7 @@ export async function renderReport(input: ReportInput, locale: Locale, pdfPath: 
   for (const caveat of caveats) {
     const text = `• ${render(caveat, locale)}`;
     const height = doc.heightOfString(text, { width: CONTENT_WIDTH });
+    // Leave room for that line unless this is the last caveat.
     const reserve = shown < caveats.length - 1 ? 12 : 0;
 
     if (y + height + reserve > limit) {
@@ -625,6 +674,7 @@ export async function renderReport(input: ReportInput, locale: Locale, pdfPath: 
       .text(t('REPORT_MORE_CAVEATS', { count: caveats.length - shown }), left, y, { width: CONTENT_WIDTH });
   }
 
+  // The footer sits at the bottom of the page wherever the content ended.
   const footerY = PAGE.height - PAGE_MARGIN - FOOTER_HEIGHT + 8;
   doc.moveTo(left, footerY - 4).lineTo(left + CONTENT_WIDTH, footerY - 4).lineWidth(0.3).strokeColor('#d1d5db').stroke();
   doc.font(FONT_REGULAR).fontSize(6.5).fillColor('#6b7280');

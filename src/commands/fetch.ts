@@ -13,6 +13,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 export { enumerateDates };
 
+/** Arguments of the fetch command. */
 export interface FetchArgs {
   qid: string;
   langs: Lang[];
@@ -22,6 +23,7 @@ export interface FetchArgs {
   out: string | null;
 }
 
+/** Coverage of one fetched series over the requested range. */
 export interface SeriesSummary {
   points: number;
   expectedDays: number;
@@ -33,6 +35,7 @@ export interface SeriesSummary {
   last: string | null;
 }
 
+/** Compact stdout JSON of the fetch command; the daily points go to the output file. */
 export interface FetchOutput {
   ok: true;
   command: 'fetch';
@@ -59,6 +62,7 @@ export interface FetchOutput {
 
 
 
+/** Counts missing days and the longest gap of a raw series against the requested range. */
 export function summarizeSeries(points: DailyPoint[], from: string, to: string): SeriesSummary {
   const expected = enumerateDates(from, to);
   const seen = new Set(points.map((point) => point.date));
@@ -103,6 +107,7 @@ function validateRange(from: string, to: string): void {
   }
 }
 
+/** Daily views of one article, from the 24-hour cache unless noCache is set. */
 export async function loadSeries(
   project: string,
   title: string,
@@ -124,6 +129,7 @@ export async function loadSeries(
   return { views, cached: false };
 }
 
+/** Daily total views of a whole edition, the denominator of views per million. */
 export async function loadTotals(
   project: string,
   from: string,
@@ -146,6 +152,7 @@ export async function loadTotals(
   return { totals, cached: false };
 }
 
+/** Wikidata revision comments of the item since a date, used to trace article renames. */
 export async function loadRevisionComments(qid: string, since: string, noCache: boolean): Promise<RevisionComment[]> {
   const key = cacheKey({ kind: 'sitelink-history', qid, since });
 
@@ -163,6 +170,7 @@ export async function loadRevisionComments(qid: string, since: string, noCache: 
   return comments;
 }
 
+/** fetch command: daily views per edition written to a file, with unavailable editions and their reasons. */
 export async function runFetch(args: FetchArgs): Promise<FetchOutput> {
   if (!/^Q\d+$/.test(args.qid)) {
     throw new SkillError('InvalidInput', `--qid "${args.qid}" is not a Wikidata item id`, { qid: args.qid });
@@ -239,6 +247,7 @@ export async function runFetch(args: FetchArgs): Promise<FetchOutput> {
     }
   }
 
+  // Missing articles or data are findings; only technical failure in every language is an error.
   if (series.length === 0 && unavailable.some((entry) => entry.status === 'fetch_failed')) {
     throw new SkillError(
       'NetworkError',

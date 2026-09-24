@@ -5,15 +5,18 @@ import { probeLanguages, resolveTopic } from '../lib/wikidata.js';
 import { SkillError } from '../types.js';
 import type { Lang, LanguageAvailability } from '../types.js';
 
+// Editions sampled into titles when no --langs are given.
 const SAMPLE_LANGS = ['en', 'de', 'fr', 'es', 'pl'];
 const SAMPLE_LIMIT = 6;
 
+/** Arguments of the resolve command. */
 export interface ResolveArgs {
   topic: string;
   lang: string;
   langs: Lang[];
 }
 
+/** Resolved Wikidata item: article titles, candidates to choose from and requested editions without an article. */
 export interface ResolveOutput {
   ok: true;
   command: 'resolve';
@@ -29,6 +32,7 @@ export interface ResolveOutput {
   titlesFile: string;
 }
 
+// stdout carries only a sample of titles; the full list is in titlesFile.
 function pickSample(titles: Record<Lang, string>, sourceLang: string, requested: Lang[]): Record<Lang, string> {
   const wanted = requested.length > 0 ? [sourceLang, ...requested] : [sourceLang, ...SAMPLE_LANGS];
   const sample: Record<Lang, string> = {};
@@ -41,6 +45,7 @@ function pickSample(titles: Record<Lang, string>, sourceLang: string, requested:
   return sample;
 }
 
+/** resolve command: topic to Wikidata QID and the article title in each edition. */
 export async function runResolve(args: ResolveArgs): Promise<ResolveOutput> {
   if (!args.topic.trim()) {
     throw new SkillError('InvalidInput', '--topic is required');
@@ -55,6 +60,7 @@ export async function runResolve(args: ResolveArgs): Promise<ResolveOutput> {
     [resolution.qid, resolution.titles],
     ...resolution.others.map((other) => [other.qid, other.titles] as const),
   ]);
+  // Other matches covering more of the requested editions than the top match are offered as candidates too.
   const widest = Math.max(0, ...resolution.others.map((other) => covered(other.titles).length));
   const better = resolution.others.filter(
     (other) =>
@@ -103,6 +109,7 @@ export async function runResolve(args: ResolveArgs): Promise<ResolveOutput> {
     qid: resolution.qid,
     label: resolution.label,
     description: resolution.description,
+    // An article-search match is always a choice for the user: the query was a phrase, not a concept.
     ambiguous: candidates.length > 0 || resolution.matchedBy === 'article_search',
     matchedBy: resolution.matchedBy,
     candidates,

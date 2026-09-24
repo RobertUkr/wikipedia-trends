@@ -16,7 +16,7 @@ Attention: how often people open one Wikipedia article, as a share of everything
 ## Reading a trend
 
 - Read `direction` first. `up`/`down` are claims; `flat` means no meaningful change; `inconclusive` means the data cannot tell. Never turn an `inconclusive` +6.9% into "growing".
-- Read `recentTrend` next. For a launch decision the current direction matters more than the three-year average. A `TREND_REVERSAL` caveat means the average points the wrong way.
+- Read `recentTrend` next (the last third of the period, shown as "since <date>"). For a launch decision the current direction matters more than the average over the period. A `TREND_REVERSAL` caveat means the average points the wrong way.
 - `absoluteTrend` falling while `relativeTrend` is flat means the edition is losing readers, not the topic.
 - Seasonality is only reported with 3+ years of data. Two years cannot separate a trend from a yearly cycle.
 

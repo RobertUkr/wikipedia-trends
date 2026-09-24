@@ -17,14 +17,16 @@ Limits of the data source and known problems. Read this when a result looks stra
 ## Titles and redirects
 
 - Views of a redirect are counted under the redirect title, **not** under the target article. Alternative spellings are therefore invisible, and the tool undercounts topics with many redirects.
-- After an article is renamed, its history stays under the old title and the new title starts from zero. This appears as a long gap and the `LONG_GAP_POSSIBLE_RENAME` caveat.
+- After an article is renamed, the Pageviews API keeps its history under the old title and the new title starts from zero. The tool follows the rename: it reads the sitelink history of the Wikidata item and takes each title only for the days it named the article (`TITLE_HISTORY_MERGED`).
+- When the Wikidata edit does not name the old title (a manual `wbsetsitelink-set`), the old title is looked up among the redirects to the new one, closest in time first, and confirmed by the move log. The sitelink may be updated up to 30 days after the move; the switch is made on the day of the move.
+- If a rename still cannot be traced, it shows up as a long gap at the edge of the series; more than 90 days stops the analysis with `ShortHistory`. A former title with no data in the middle of the history counts as missing days, not as zero views, and lowers continuity (`LONG_GAP_POSSIBLE_RENAME`).
 - Titles come from Wikidata sitelinks. A language without a sitelink is checked by a search in that edition and classified as `no_article` or `possible_alternative`. An alternative is never used without the user's confirmation.
 
 ## Rate limits and etiquette
 
 - Wikimedia's current limits (June 2026): about **10 requests/minute** for a client identified only by IP, about **200 requests/minute** with a compliant User-Agent.
-- The CLI sends requests one at a time, at most one every 300 ms, and retries 429 and 5xx with exponential backoff and `Retry-After`.
-- Set `WIKIMEDIA_CONTACT` (an email or URL). Without it the User-Agent has no contact and the client can fall into the lower tier.
+- The CLI sends requests one at a time and retries 429 and 5xx with exponential backoff and `Retry-After`.
+- There is no built-in contact. With `WIKIMEDIA_CONTACT` (an email or URL) set, the User-Agent carries it and the CLI sends at most one request every 300 ms. Without it the User-Agent names only the tool, the client is in the lower tier, and the CLI waits 6 s between requests.
 - Responses are cached in `.cache/` for 24 hours; repeated questions do not hit the network.
 
 ## Sources

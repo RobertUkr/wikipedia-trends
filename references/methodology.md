@@ -6,7 +6,9 @@ How every number in the CLI output is produced. Read this only when the user ask
 
 - Daily pageviews per article from the Wikimedia Pageviews API, always `agent=user`, `access=all-access`.
 - The exact article per language comes from Wikidata sitelinks, never from guessing a title.
-- Days the API does not return are gaps. They are interpolated for the fit and reported as `missingDays`; they are never treated as zero.
+- Inside the series, a day the API does not return had no views: the API omits zero days. Such days count as 0 and are reported as `zeroDays` with the `ZERO_VIEW_DAYS` caveat.
+- Days missing at the start or end of the range (before the article existed, after the last published day) are gaps. They take the value of the nearest known day and are reported as `missingDays`; they are never treated as zero, so a late-created article does not look like growth from nothing. A gap over 90 days stops the analysis (`ShortHistory`).
+- After a rename each title is read only for the days it named the article (see `api-notes.md`). Days of a former title that has no data are gaps too, not zero views.
 
 ## Normalisation
 
@@ -26,7 +28,8 @@ How every number in the CLI output is produced. Read this only when the user ask
 - Reason: daily pageviews are strongly autocorrelated, and the confidence interval of the slope assumes independent points. On synthetic AR(1) data with φ = 0.8 the daily interval is 2.2× too narrow; weekly sums remove most of that.
 - The fit is **Theil-Sen**: the median of all pairwise slopes. It ignores up to ~29% outlying points, unlike least squares, which a single spike can tilt.
 - The 95% interval comes from the Kendall-statistic ranks of the pairwise slopes.
-- `percentPerYear` = slope × 52.14 weeks ÷ fitted value at the start of the period × 100.
+- The percent comes from a second Theil-Sen fit on the logarithm of the weekly values (a zero week gets half the smallest non-zero value added first). `percentPerYear` = (e^(log-slope × 52.14) − 1) × 100, a compound rate: it can never fall below −100%, whereas a linear slope divided by the starting value can on a short, steeply falling window. The interval endpoints are transformed the same way.
+- The log keeps the sign of every pairwise slope, so `up` and `down` are the same as the linear fit would give. The linear fit is still drawn on the chart and used for spikes and stability.
 - `recentTrend` is the same fit on the last third of the weekly series. It shows the current direction, which can differ from the average over the whole period.
 
 ## Direction
@@ -71,14 +74,15 @@ The verdict may never contradict its own caveats:
 |---|---|
 | `LOW_VOLUME` | too few views per day; counts are mostly noise |
 | `SERIES_TOO_SHORT` / `SERIES_SHORTER_THAN_YOY` | range too short for a trend / for year-over-year |
-| `INTERVAL_SPANS_ZERO` | no growth or decline can be claimed |
+| `INTERVAL_SPANS_ZERO` | the interval spans zero and is wider than the flat band: no growth, decline or stability can be claimed |
 | `SLOPE_SIGN_UNSTABLE` | the slope changes sign inside the period |
 | `TREND_REVERSAL` | the recent trend points the other way than the whole period, both intervals clear of zero |
 | `SPIKES_EXCLUDED` | spike days were removed before fitting |
 | `LONG_GAP_POSSIBLE_RENAME` | a gap of 14+ days; the article may have been renamed, split or merged |
 | `GAPS_INTERPOLATED` | a few missing days were interpolated |
+| `ZERO_VIEW_DAYS` | days inside the series with no views; the API omits them and they count as 0 |
 | `RAW_COUNTS_NOT_COMPARABLE` | edition totals were missing; the series is raw and not comparable across languages |
-| `ABSOLUTE_VS_RELATIVE` | explains the two trends |
+| `ABSOLUTE_VS_RELATIVE` | raw views and share of edition traffic point in different directions |
 | `EDITION_TRAFFIC_DECLINING` | raw views fall while the share is flat: the edition is shrinking, not interest in the topic |
 | `WEEKLY_AGGREGATION` | the fit uses weekly sums |
 | `ALL_LANGUAGES_DECLINING` | every compared language declines; rank 1 is the slowest decline |
@@ -88,3 +92,5 @@ The verdict may never contradict its own caveats:
 ## Ranking in `compare`
 
 `perspective = 0.5·growth + 0.3·level + 0.2·confidence`. Growth (relative trend) and level (median per million) are min-max scaled **across the compared languages only**, so the score ranks them against each other and says nothing in absolute terms.
+
+The order in `RECOMMEND_ORDER` ("what to check next") is this ranking. It is given even when no language can be recommended for a launch.
